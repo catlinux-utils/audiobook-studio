@@ -195,22 +195,6 @@ export default function BookDetail() {
             {book.status === 'generating' || book.status === 'paused' ? (
               <Button variant="danger" onClick={() => act('cancel', () => api.cancel(id))}>Cancel</Button>
             ) : null}
-            {chapterData && (
-              <Button
-                variant="ghost"
-                disabled={busy !== '' || !book.voice_id || chapterPending === 0}
-                onClick={() => chapterId && act('queue-ch', () => api.generateChapter(id, chapterId).then(refreshBook))}
-                title={
-                  !book.voice_id
-                    ? 'assign a voice first'
-                    : chapterPending === 0
-                      ? 'this chapter has no pending chunks'
-                      : `add the selected chapter to the generation queue (${chapterPending} chunks; chapters run one after another)`
-                }
-              >
-                ⚡ Queue chapter{chapterPending > 0 ? ` (${chapterPending})` : ''}
-              </Button>
-            )}
             <Button
               disabled={busy !== '' || doneChunks === 0}
               onClick={() => act('export', async () => {
@@ -405,13 +389,29 @@ export default function BookDetail() {
             <Panel
               title={`${chapterData.chapter.idx + 1}. ${chapterData.chapter.title}`}
               right={
-                <Button
-                  variant="ghost"
-                  disabled={chapterData.chunks.filter((c) => c.status === 'done').length === 0}
-                  onClick={() => playUrl(api.audioUrl.chapter(id, chapterId!))}
-                >
-                  ▶ play whole chapter
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    disabled={busy !== '' || !book.voice_id || chapterPending === 0}
+                    onClick={() => act('queue-ch', () => api.generateChapter(id, chapterData.chapter.id).then(refreshBook))}
+                    title={
+                      !book.voice_id
+                        ? 'assign a voice first'
+                        : chapterPending === 0
+                          ? 'this chapter has no pending chunks'
+                          : `add this chapter to the generation queue (${chapterPending} chunks; chapters run one after another)`
+                    }
+                  >
+                    ⚡ queue chapter{chapterPending > 0 ? ` (${chapterPending})` : ''}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    disabled={chapterData.chunks.filter((c) => c.status === 'done').length === 0}
+                    onClick={() => playUrl(api.audioUrl.chapter(id, chapterId!))}
+                  >
+                    ▶ play whole chapter
+                  </Button>
+                </div>
               }
             >
               {chapterData.chunks.length > 0 && <ChunkTimeline chunks={chapterData.chunks} onSeek={(ms) => seekChapter(ms)} />}
