@@ -19,9 +19,10 @@ export default function BookDetail() {
   const [editAuthor, setEditAuthor] = useState('');
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [editChapterTitle, setEditChapterTitle] = useState('');
-  const [exports, setExports] = useState<Array<{ id: string; path: string; duration_ms: number; chapter_count: number; created_at: string }>>([]);
+  const [exports, setExports] = useState<Array<{ id: string; path: string; format: string; duration_ms: number; chapter_count: number; created_at: string }>>([]);
   const [selectedChapters, setSelectedChapters] = useState<Set<string>>(new Set());
   const [selectedChunks, setSelectedChunks] = useState<Set<string>>(new Set());
+  const [exportedNote, setExportedNote] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const refreshBook = useCallback(() => {
@@ -244,6 +245,11 @@ export default function BookDetail() {
             </Button>
           </div>
           {error && <div className="mt-3 rounded-lg bg-red-950 border border-red-800 text-red-200 px-3 py-1.5 text-sm">{error}</div>}
+          {exportedNote && !error && (
+            <div className="mt-3 rounded-lg bg-emerald-950 border border-emerald-800 text-emerald-200 px-3 py-1.5 text-sm">
+              ✓ {exportedNote} — see Exported audiobooks below
+            </div>
+          )}
         </div>
       </div>
 
@@ -310,7 +316,8 @@ export default function BookDetail() {
               <div key={x.id} className="flex items-center gap-3 text-sm">
                 <span className="font-medium">📕 {x.path.split(/[\\/]/).pop()}</span>
                 <span className="text-xs text-zinc-500">
-                  {x.chapter_count} chapter(s) · {formatDuration(x.duration_ms)} · {new Date(x.created_at).toLocaleString()}
+                  <span className="text-zinc-400 uppercase">{x.format}</span> · {x.chapter_count} chapter(s) · {formatDuration(x.duration_ms)} ·{' '}
+                  {new Date(x.created_at).toLocaleString()}
                 </span>
                 <a
                   href={`/api/exports/${x.id}/download`}
@@ -476,6 +483,30 @@ export default function BookDetail() {
                     onClick={() => playUrl(api.audioUrl.chapter(id, chapterId!))}
                   >
                     ▶ play whole chapter
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    disabled={busy !== '' || chapterData.chunks.every((c) => c.status !== 'done')}
+                    onClick={() =>
+                      act('export-ch', () =>
+                        api.exportChapter(id, chapterData.chapter.id).then((r) => {
+                          refreshBook();
+                          setExportedNote(
+                            r.parts < r.total
+                              ? `exported ${r.parts}/${r.total} generated parts of this chapter`
+                              : 'chapter exported',
+                          );
+                          setTimeout(() => setExportedNote(null), 6000);
+                        }),
+                      )
+                    }
+                    title={
+                      chapterData.chunks.some((c) => c.status === 'done')
+                        ? `export the ${chapterData.chunks.filter((c) => c.status === 'done').length} generated part(s) as one MP3`
+                        : 'nothing generated in this chapter yet'
+                    }
+                  >
+                    ⬇ export chapter
                   </Button>
                 </div>
               }

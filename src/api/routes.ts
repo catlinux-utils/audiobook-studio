@@ -416,6 +416,54 @@ export function registerRoutes(app: FastifyInstance): void {
     return result;
   });
 
+  /**
+   * Export everything generated in one chapter to a single MP3 — works on
+   * partially generated chapters too (exports the parts that exist).
+   */
+  app.post('/api/books/:id/chapters/:chapterId/export', async (req, reply) => {
+    const { id, chapterId } = req.params as { id: string; chapterId: string };
+    const db = getDb();
+    const book = db.prepare('SELECT * FROM books WHERE id=?').get(id) as unknown as BookRow | undefined;
+    if (!book) return reply.code(404).send({ error: 'book not found' });
+    const chapter = db
+      .prepare('SELECT * FROM chapters WHERE id=? AND book_id=?')
+      .get(chapterId, id) as unknown as ChapterRow | undefined;
+    if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
+    const chunks = db
+      .prepare("SELECT audio_path FROM chunks WHERE chapter_id=? AND status='done' AND audio_path IS NOT NULL ORDER BY idx")
+      .all(chapterId) as unknown as Array<{ audio_path: string }>;
+    if (chunks.length === 0) return reply.code(409).send({ error: 'no generated audio in this chapter' });
+    const total = db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=?').get(chapterId) as unknown as { n: number };
+
+    try {
+      const assembled = await assembleChapter(chapterId, chunks.map((c) => c.audio_path));
+      fs.mkdirSync(paths.exports, { recursive: true });
+      const safe = `${book.title} - ${chapter.title}`
+        .replace(/[\\/:*?"<>|]+/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120) || chapterId;
+      const out = path.join(paths.exports, `${safe}.mp3`);
+      await exportChapterMp3(assembled.path, out);
+      const record = {
+        id: randomUUID(),
+        book_id: id,
+        format: 'mp3',
+        path: out,
+        chapter_count: 1,
+        duration_ms: assembled.durationMs,
+        created_at: new Date().toISOString(),
+      };
+      db.prepare('INSERT INTO exports (id, book_id, format, path, chapter_count, duration_ms, created_at) VALUES (?,?,?,?,?,?,?)').run(
+        record.id, record.book_id, record.format, record.path, record.chapter_count, record.duration_ms, record.created_at,
+      );
+      bus.emit('event', { type: 'book.update', bookId: id, status: book.status });
+      return { export: record, parts: chunks.length, total: total.n };
+    } catch (err) {
+      return reply.code(500).send({ error: `chapter export failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  });
+
   app.post('/api/books/:id/pause', async (req) => queue.pauseBook((req.params as { id: string }).id) ?? { ok: true });
   app.post('/api/books/:id/cancel', async (req) => queue.cancelBook((req.params as { id: string }).id) ?? { ok: true });
 
