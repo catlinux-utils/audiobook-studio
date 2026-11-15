@@ -205,6 +205,46 @@ export function registerRoutes(app: FastifyInstance): void {
     return { id: bookId };
   });
 
+  /**
+   * Paste a short text (story / article) as a one-chapter draft book — same
+   * pipeline as ingested books (chunks, queue, exports, QA), no file needed.
+   */
+  app.post('/api/books/paste', async (req, reply) => {
+    const body = (req.body ?? {}) as { title?: string; author?: string; language?: string; text?: string; voiceId?: string };
+    const text = (body.text ?? '').replace(/\r\n/g, '\n').trim();
+    const title = (body.title ?? '').trim();
+    if (!text) return reply.code(400).send({ error: 'text is required' });
+    if (!title) return reply.code(400).send({ error: 'title is required' });
+    if (text.length > 200_000) return reply.code(413).send({ error: 'text too long for a quick paste (max ~200k chars) — ingest a file instead' });
+
+    const db = getDb();
+    if (body.voiceId) {
+      const voice = db.prepare('SELECT id FROM voices WHERE id=?').get(body.voiceId);
+      if (!voice) return reply.code(422).send({ error: 'voice not found' });
+    }
+
+    const s = loadSettings();
+    const bookId = randomUUID();
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO books (id, title, author, language, cover_path, source_file, status, voice_id, max_chunk_chars, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      bookId, title.slice(0, 120), (body.author ?? '').trim().slice(0, 120), (body.language ?? '').trim(),
+      null, 'pasted', 'draft', body.voiceId || null, s.defaultMaxChunkChars, now, now,
+    );
+    // keep the text on disk so re-chunking works like for ingested books
+    const bookDir = path.join(paths.books, bookId);
+    fs.mkdirSync(bookDir, { recursive: true });
+    fs.writeFileSync(path.join(bookDir, 'source.txt'), text);
+
+    insertChaptersAndChunks(bookId, [{ title: 'Full text', text }], s.defaultMaxChunkChars);
+    const chapter = db.prepare('SELECT id FROM chapters WHERE book_id=? ORDER BY idx LIMIT 1').get(bookId) as unknown as { id: string };
+    const chunkCount = (db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE book_id=?').get(bookId) as unknown as { n: number }).n;
+    bus.emit('event', { type: 'book.update', bookId, status: 'draft' });
+    return { id: bookId, chapterId: chapter.id, chunkCount };
+  });
+
   app.get('/api/books/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();

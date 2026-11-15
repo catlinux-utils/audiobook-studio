@@ -358,6 +358,9 @@ export const api = {
     return (await res.json()) as { id: string };
   },
 
+  pasteBook: (args: { title: string; author?: string; language?: string; text: string; voiceId?: string }) =>
+    req<{ id: string; chapterId: string; chunkCount: number }>('POST', '/api/books/paste', args),
+
   uploadVoice: async (name: string, referenceText: string, file: File): Promise<{ id: string }> => {
     const form = new FormData();
     form.append('name', name);
