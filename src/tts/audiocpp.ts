@@ -19,6 +19,7 @@ export class TtsRequestError extends Error {
   constructor(
     public status: number,
     message: string,
+    public transient = false,
   ) {
     super(message);
     this.name = 'TtsRequestError';
@@ -82,7 +83,9 @@ export class AudioCppClient {
       try {
         return await this.synthesizeOnce(req);
       } catch (err) {
-        if (err instanceof ServerBusyError && attempt <= retries) {
+        const busy = err instanceof ServerBusyError;
+        const transient = err instanceof TtsRequestError && err.transient;
+        if ((busy || transient) && attempt <= retries) {
           await sleep(Math.min(1000 * 2 ** (attempt - 1), 15000), req.signal);
           continue;
         }
@@ -121,10 +124,10 @@ export class AudioCppClient {
     const contentType = res.headers.get('content-type') ?? '';
     if (!/audio\/wav|application\/octet-stream/i.test(contentType)) {
       // some builds return JSON errors with 200 in odd configs — treat as failure
-      throw new TtsRequestError(res.status, `unexpected content-type: ${contentType}`);
+      throw new TtsRequestError(res.status, `unexpected content-type: ${contentType}`, true);
     }
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 44) throw new TtsRequestError(res.status, 'response too short to be a WAV');
+    if (buf.length < 44) throw new TtsRequestError(res.status, 'response too short to be a WAV', true);
     return buf;
   }
 }
