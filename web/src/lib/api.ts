@@ -45,11 +45,51 @@ export interface Chunk {
   attempts: number;
 }
 
+export type ExpertOptions = Partial<Record<string, string | number | boolean>>;
+
 export interface Voice {
   id: string;
   name: string;
   reference_text: string;
   created_at: string;
+  /** JSON-encoded expert synthesis options (Clone Lab bench). */
+  synth_options?: ExpertOptions | null;
+}
+
+export interface VoiceDetail extends Voice {
+  duration_ms: number | null;
+}
+
+export interface VoiceTake {
+  id: string;
+  created_at: string;
+  text: string;
+  language: string | null;
+  options: ExpertOptions;
+  duration_ms: number;
+  qa: ChunkQa | null;
+}
+
+export interface ExpertRunResult {
+  duration_ms: number;
+  qa: ChunkQa | null;
+  audio_base64: string;
+  takeId?: string;
+  options: ExpertOptions;
+}
+
+export interface CleanupOptions {
+  start?: number | null;
+  end?: number | null;
+  highpassHz?: number;
+  lowpassHz?: number;
+  denoiseStrength?: number;
+  loudnorm?: boolean;
+  compressor?: boolean;
+  gainDb?: number;
+  fadeInSec?: number;
+  fadeOutSec?: number;
+  trimSilence?: boolean;
 }
 
 export interface JobStats {
@@ -256,12 +296,45 @@ export const api = {
   chunkQa: (id: string) => req<ChunkQa>('POST', `/api/chunks/${id}/qa`),
 
   listVoices: () => req<Voice[]>('GET', '/api/voices'),
-  updateVoice: (id: string, patch: { name?: string; referenceText?: string }) =>
+  getVoice: (id: string) => req<VoiceDetail>('GET', `/api/voices/${id}`),
+  updateVoice: (id: string, patch: { name?: string; referenceText?: string; synthOptions?: ExpertOptions | null }) =>
     req<Voice>('PATCH', `/api/voices/${id}`, patch),
   deleteVoice: (id: string) => req<{ ok: boolean }>('DELETE', `/api/voices/${id}`),
   alignVoice: (id: string) => req<Alignment>('POST', `/api/voices/${id}/align`),
   testVoice: (id: string, text: string, language?: string) =>
     req<CloneTest>('POST', `/api/voices/${id}/test`, { text, language }),
+
+  // ---------- expert mode ----------
+  cleanupVoice: async (id: string, options: CleanupOptions): Promise<{ url: string; durationMs: number; sizeBytes: number }> => {
+    const res = await fetch(`/api/voices/${id}/cleanup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options),
+    });
+    if (!res.ok) {
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(j.error ?? `${res.status}`);
+    }
+    return {
+      url: URL.createObjectURL(await res.blob()),
+      durationMs: Number(res.headers.get('X-Cleanup-Duration-Ms') ?? 0),
+      sizeBytes: Number(res.headers.get('X-Cleanup-Size-Bytes') ?? 0),
+    };
+  },
+  replaceVoiceAudio: async (id: string, file: File): Promise<{ ok: boolean; duration_ms: number }> => {
+    const form = new FormData();
+    form.append('wav', file);
+    const res = await fetch(`/api/voices/${id}/audio`, { method: 'PUT', body: form });
+    if (!res.ok) {
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(j.error ?? `${res.status}`);
+    }
+    return (await res.json()) as { ok: boolean; duration_ms: number };
+  },
+  expertRun: (id: string, args: { text: string; language?: string; seed?: string; options?: ExpertOptions; saveTake?: boolean }) =>
+    req<ExpertRunResult>('POST', `/api/voices/${id}/expert-run`, args),
+  listTakes: (id: string) => req<VoiceTake[]>(`GET`, `/api/voices/${id}/takes`),
+  deleteTake: (voiceId: string, takeId: string) => req<{ ok: boolean }>('DELETE', `/api/voices/${voiceId}/takes/${takeId}`),
 
   uploadBook: async (file: File): Promise<{ id: string }> => {
     const form = new FormData();
@@ -291,6 +364,7 @@ export const api = {
     chunk: (id: string) => `/api/chunks/${id}/audio`,
     chapter: (bookId: string, chapterId: string) => `/api/books/${bookId}/chapters/${chapterId}/audio`,
     voice: (id: string) => `/api/voices/${id}/audio`,
+    take: (voiceId: string, takeId: string) => `/api/voices/${voiceId}/takes/${takeId}/audio`,
   },
   previewVoice: async (id: string, text: string): Promise<string> => {
     const res = await fetch(`/api/voices/${id}/preview`, {

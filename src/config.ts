@@ -55,13 +55,14 @@ export const paths = {
   data: path.join(root, 'data'),
   books: path.join(root, 'data', 'books'),
   voices: path.join(root, 'data', 'voices'),
+  voicesTakes: path.join(root, 'data', 'voices-takes'),
   exports: path.join(root, 'data', 'exports'),
   runtime: path.join(root, 'runtime'),
   db: path.join(root, 'data', 'studio.db'),
 };
 
 export function ensureDirs(): void {
-  for (const dir of [paths.data, paths.books, paths.voices, paths.exports]) {
+  for (const dir of [paths.data, paths.books, paths.voices, paths.voicesTakes, paths.exports]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }

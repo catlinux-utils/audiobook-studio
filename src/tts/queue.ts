@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getDb, type BookRow, type ChunkRow } from '../db.js';
+import { expertOptionsToRequest, type ExpertRequestFields, type ExpertOptions } from './voiceOptions.js';
 import { paths, loadSettings } from '../config.js';
 import { ttsBaseUrl } from './managed.js';
 import { AudioCppClient, ServerBusyError, TtsRequestError } from './audiocpp.js';
@@ -500,13 +501,22 @@ export class TtsQueue {
 
     let voiceRefBase64: string | undefined;
     let referenceText: string | undefined;
+    // per-voice expert options from the Clone Lab bench (see tts/voiceOptions.ts)
+    let expert: ExpertRequestFields = {};
     if (book.voice_id) {
       const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(book.voice_id) as unknown as
-        | { wav_path: string; reference_text: string }
+        | { wav_path: string; reference_text: string; synth_options: string | null }
         | undefined;
       if (voice) {
         voiceRefBase64 = fs.readFileSync(voice.wav_path).toString('base64');
         referenceText = voice.reference_text || undefined;
+        if (voice.synth_options) {
+          try {
+            expert = expertOptionsToRequest(JSON.parse(voice.synth_options) as ExpertOptions);
+          } catch {
+            // corrupt stored options — fall back to spec defaults
+          }
+        }
       }
     }
 
@@ -532,6 +542,8 @@ export class TtsQueue {
           language: book.language || undefined,
           voiceRefBase64,
           referenceText,
+          ...expert,
+          // the three book-owned settings win over the voice's bench values
           numInferenceSteps: book.num_inference_steps,
           guidanceScale: book.guidance_scale,
           speed: book.speed === 1 ? undefined : book.speed,

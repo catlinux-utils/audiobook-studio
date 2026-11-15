@@ -40,6 +40,25 @@ export interface SynthesizeRequest {
   guidanceScale?: number;
   speed?: number;
   seed?: string;
+  // ---- expert-mode options (OmniVoice request options, see tts/voiceOptions.ts) ----
+  /** voice-design instruction: speaker attributes, accent, style, delivery */
+  instruct?: string;
+  /** force a target output duration (seconds); empty = model estimate */
+  durationSec?: number;
+  /** diffusion timestep schedule shift (default 0.1) */
+  shift?: number;
+  /** add the denoise control token when reference audio is present (default true) */
+  denoise?: boolean;
+  /** preprocess the speaker reference before tokenization (default true) */
+  preprocessPrompt?: boolean;
+  /** apply output postprocessing/trimming (default true) */
+  postprocessOutput?: boolean;
+  /** layer-order penalty for masked codebook-position selection (default 5) */
+  layerPenaltyFactor?: number;
+  /** Gumbel temperature for masked-position selection (default 5) */
+  positionTemperature?: number;
+  /** audio-token class sampling temperature; 0 = greedy (default 0) */
+  classTemperature?: number;
   signal?: AbortSignal;
 }
 
@@ -132,6 +151,15 @@ export class AudioCppClient {
     if (req.numInferenceSteps !== undefined) options.num_inference_steps = req.numInferenceSteps;
     if (req.guidanceScale !== undefined) options.guidance_scale = req.guidanceScale;
     if (req.speed !== undefined && req.speed !== 1) options.speed = req.speed;
+    if (req.instruct !== undefined && req.instruct !== '') options.instruct = req.instruct;
+    if (req.durationSec !== undefined) options.duration_sec = req.durationSec;
+    if (req.shift !== undefined) options.shift = req.shift;
+    if (req.denoise !== undefined) options.denoise = req.denoise;
+    if (req.preprocessPrompt !== undefined) options.preprocess_prompt = req.preprocessPrompt;
+    if (req.postprocessOutput !== undefined) options.postprocess_output = req.postprocessOutput;
+    if (req.layerPenaltyFactor !== undefined) options.layer_penalty_factor = req.layerPenaltyFactor;
+    if (req.positionTemperature !== undefined) options.position_temperature = req.positionTemperature;
+    if (req.classTemperature !== undefined) options.class_temperature = req.classTemperature;
     if (Object.keys(options).length > 0) body.options = options;
     if (req.seed) body.seed = req.seed;
 

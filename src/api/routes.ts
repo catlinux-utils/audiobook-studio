@@ -3,7 +3,7 @@ import '@fastify/multipart';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { getDb, type BookRow, type ChapterRow, type ChunkRow, type VoiceRow } from '../db.js';
+import { getDb, type BookRow, type ChapterRow, type ChunkRow, type VoiceRow, type VoiceTakeRow } from '../db.js';
 import { paths, loadSettings, saveSettings, type AppSettings } from '../config.js';
 import { parseEpub } from '../ingest/epub.js';
 import { splitTxtChapters } from '../ingest/txt.js';
@@ -12,6 +12,8 @@ import { queue } from '../tts/queue.js';
 import { AudioCppClient } from '../tts/audiocpp.js';
 import { alignTranscript } from '../tts/align.js';
 import { runFfmpeg, qaTake, type WordQa } from '../tts/qa.js';
+import { sanitizeExpertOptions, expertOptionsToRequest, type ExpertOptions } from '../tts/voiceOptions.js';
+import { applyVoiceCleanup, CLEANUP_MAX_BYTES, type CleanupOptions } from '../audio/voiceCleanup.js';
 import { readWavInfo } from '../audio/wavmeta.js';
 import { assembleChapter, exportM4b, exportChapterMp3 } from '../audio/assemble.js';
 import { bus } from '../bus.js';
@@ -816,7 +818,7 @@ export function registerRoutes(app: FastifyInstance): void {
 
   // ---------- voices ----------
   app.get('/api/voices', async () => {
-    return getDb().prepare('SELECT id, name, reference_text, created_at FROM voices ORDER BY name').all();
+    return getDb().prepare('SELECT id, name, reference_text, synth_options, created_at FROM voices ORDER BY name').all();
   });
 
   app.post('/api/voices', async (req, reply) => {
@@ -857,12 +859,12 @@ export function registerRoutes(app: FastifyInstance): void {
 
   app.patch('/api/voices/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const body = (req.body ?? {}) as { name?: string; referenceText?: string };
+    const body = (req.body ?? {}) as { name?: string; referenceText?: string; synthOptions?: unknown };
     const db = getDb();
     const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
     if (!voice) return reply.code(404).send({ error: 'voice not found' });
 
-    const next: { name?: string; reference_text?: string } = {};
+    const next: { name?: string; reference_text?: string; synth_options?: string | null } = {};
     if (body.name !== undefined) {
       const name = String(body.name).trim();
       if (!name) return reply.code(400).send({ error: 'name cannot be empty' });
@@ -871,6 +873,15 @@ export function registerRoutes(app: FastifyInstance): void {
       next.name = name;
     }
     if (body.referenceText !== undefined) next.reference_text = String(body.referenceText).trim();
+    if (body.synthOptions !== undefined) {
+      if (body.synthOptions === null) {
+        next.synth_options = null;
+      } else {
+        const { options, rejected } = sanitizeExpertOptions(body.synthOptions);
+        if (rejected.length > 0) return reply.code(400).send({ error: `unknown option(s): ${rejected.join(', ')}` });
+        next.synth_options = Object.keys(options).length > 0 ? JSON.stringify(options) : null;
+      }
+    }
 
     const keys = Object.keys(next);
     if (keys.length > 0) {
@@ -879,7 +890,8 @@ export function registerRoutes(app: FastifyInstance): void {
       db.prepare(`UPDATE voices SET ${sets} WHERE id=?`).run(...values, id);
       bus.emit('event', { type: 'voices.update' });
     }
-    return db.prepare('SELECT id, name, reference_text, created_at FROM voices WHERE id=?').get(id);
+    const row = db.prepare('SELECT id, name, reference_text, synth_options, created_at FROM voices WHERE id=?').get(id) as unknown as { synth_options: string | null };
+    return { ...row, synthOptions: row.synth_options ? JSON.parse(row.synth_options) : null };
   });
 
   app.delete('/api/voices/:id', async (req, reply) => {
@@ -887,6 +899,9 @@ export function registerRoutes(app: FastifyInstance): void {
     const db = getDb();
     const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
     if (!voice) return reply.code(404).send({ error: 'voice not found' });
+    // remove experiment takes from disk before the cascade drops the rows
+    const takes = db.prepare('SELECT wav_path FROM voice_takes WHERE voice_id=?').all(id) as unknown as Array<{ wav_path: string }>;
+    for (const t of takes) fs.rmSync(t.wav_path, { force: true });
     db.prepare('DELETE FROM voices WHERE id=?').run(id);
     fs.rmSync(voice.wav_path, { force: true });
     bus.emit('event', { type: 'voices.update' });
@@ -1070,6 +1085,164 @@ export function registerRoutes(app: FastifyInstance): void {
     } finally {
       fs.rmSync(tmp, { force: true });
     }
+  });
+
+  // ---------- expert mode: reference cleanup & parameter bench ----------
+
+  app.get('/api/voices/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const row = getDb().prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
+    if (!row) return reply.code(404).send({ error: 'voice not found' });
+    let durationMs: number | null = null;
+    try {
+      durationMs = readWavInfo(fs.readFileSync(row.wav_path)).durationMs;
+    } catch {
+      durationMs = null;
+    }
+    return {
+      id: row.id,
+      name: row.name,
+      reference_text: row.reference_text,
+      created_at: row.created_at,
+      duration_ms: durationMs,
+      synth_options: row.synth_options ? (JSON.parse(row.synth_options) as ExpertOptions) : null,
+    };
+  });
+
+  /** Cleanup preview: run the filter chain on the current reference (nothing saved). */
+  app.post('/api/voices/:id/cleanup', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const voice = getDb().prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
+    if (!voice) return reply.code(404).send({ error: 'voice not found' });
+    const body = (req.body ?? {}) as CleanupOptions;
+    const out = path.join(paths.data, `cleanup-${randomUUID()}.wav`);
+    try {
+      const { durationMs, sizeBytes } = await applyVoiceCleanup(voice.wav_path, out, body);
+      return reply
+        .type('audio/wav')
+        .header('X-Cleanup-Duration-Ms', String(durationMs))
+        .header('X-Cleanup-Size-Bytes', String(sizeBytes))
+        .send(fs.readFileSync(out));
+    } catch (err) {
+      return reply.code(422).send({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      fs.rmSync(out, { force: true });
+    }
+  });
+
+  /** Replace the reference WAV (transcript untouched) — cleanup "save as reference". */
+  app.put('/api/voices/:id/audio', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const db = getDb();
+    const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
+    if (!voice) return reply.code(404).send({ error: 'voice not found' });
+    const parts = req.parts({ limits: { fileSize: MAX_VOICE_WAV_BYTES } });
+    let wav: Buffer | null = null;
+    for await (const part of parts) {
+      if (part.type === 'file' && part.fieldname === 'wav') wav = await part.toBuffer();
+    }
+    if (!wav) return reply.code(400).send({ error: 'wav file is required' });
+    try {
+      readWavInfo(wav); // throws if not a valid WAV
+    } catch (err) {
+      return reply.code(422).send({ error: `invalid WAV: ${err instanceof Error ? err.message : String(err)}` });
+    }
+    fs.writeFileSync(voice.wav_path, wav);
+    bus.emit('event', { type: 'voices.update' });
+    return { ok: true, duration_ms: readWavInfo(wav).durationMs };
+  });
+
+  /**
+   * Expert bench run: synthesize one sentence with explicit synthesis options,
+   * score it with the ASR word-check, optionally keep it as a saved take.
+   */
+  app.post('/api/voices/:id/expert-run', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { text?: string; language?: string; seed?: string; options?: unknown; saveTake?: boolean };
+    const db = getDb();
+    const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
+    if (!voice) return reply.code(404).send({ error: 'voice not found' });
+    const text = (body.text ?? '').trim();
+    if (!text) return reply.code(400).send({ error: 'text is required' });
+    const { options, rejected } = sanitizeExpertOptions(body.options);
+    if (rejected.length > 0) return reply.code(400).send({ error: `unknown option(s): ${rejected.join(', ')}` });
+
+    const settings = loadSettings();
+    const tmp = path.join(paths.data, `expert-${randomUUID()}.wav`);
+    try {
+      const client = new AudioCppClient(ttsBaseUrl(), settings.model);
+      const wav = await client.synthesize({
+        input: text.slice(0, 600),
+        language: body.language || undefined,
+        voiceRefBase64: fs.readFileSync(voice.wav_path).toString('base64'),
+        referenceText: voice.reference_text || undefined,
+        seed: body.seed || undefined,
+        ...expertOptionsToRequest(options),
+      });
+      fs.writeFileSync(tmp, wav);
+      const info = readWavInfo(wav);
+      let qa: WordQa | null = null;
+      try {
+        qa = await qaTake(tmp, text, body.language || undefined);
+      } catch {
+        qa = null; // ASR unavailable — still return the audio
+      }
+      let takeId: string | undefined;
+      if (body.saveTake) {
+        takeId = randomUUID();
+        const dest = path.join(paths.voicesTakes, `${takeId}.wav`);
+        fs.renameSync(tmp, dest);
+        db.prepare(
+          `INSERT INTO voice_takes (id, voice_id, created_at, text, language, options_json, wav_path, duration_ms, qa_json)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+        ).run(
+          takeId, id, new Date().toISOString(), text, body.language || null,
+          JSON.stringify(options), dest, info.durationMs, qa ? JSON.stringify(qa) : null,
+        );
+      }
+      return { duration_ms: info.durationMs, qa, audio_base64: wav.toString('base64'), takeId, options };
+    } catch (err) {
+      return reply.code(502).send({ error: `expert run failed: ${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  });
+
+  app.get('/api/voices/:id/takes', async (req) => {
+    const { id } = req.params as { id: string };
+    const rows = getDb()
+      .prepare('SELECT * FROM voice_takes WHERE voice_id=? ORDER BY created_at DESC')
+      .all(id) as unknown as VoiceTakeRow[];
+    return rows.map((r) => ({
+      id: r.id,
+      created_at: r.created_at,
+      text: r.text,
+      language: r.language,
+      options: JSON.parse(r.options_json) as ExpertOptions,
+      duration_ms: r.duration_ms,
+      qa: r.qa_json ? JSON.parse(r.qa_json) : null,
+    }));
+  });
+
+  app.delete('/api/voices/:id/takes/:takeId', async (req, reply) => {
+    const { id, takeId } = req.params as { id: string; takeId: string };
+    const db = getDb();
+    const row = db
+      .prepare('SELECT * FROM voice_takes WHERE id=? AND voice_id=?')
+      .get(takeId, id) as unknown as VoiceTakeRow | undefined;
+    if (!row) return reply.code(404).send({ error: 'take not found' });
+    db.prepare('DELETE FROM voice_takes WHERE id=?').run(takeId);
+    fs.rmSync(row.wav_path, { force: true });
+    return { ok: true };
+  });
+
+  app.get('/api/voices/:id/takes/:takeId/audio', async (req, reply) => {
+    const { id, takeId } = req.params as { id: string; takeId: string };
+    const row = getDb()
+      .prepare('SELECT wav_path FROM voice_takes WHERE id=? AND voice_id=?')
+      .get(takeId, id) as unknown as { wav_path: string } | undefined;
+    if (!row || !fs.existsSync(row.wav_path)) return reply.code(404).send({ error: 'take not found' });
+    return reply.type('audio/wav').send(fs.createReadStream(row.wav_path));
   });
 
   // ---------- SSE events ----------

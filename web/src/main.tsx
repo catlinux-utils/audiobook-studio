@@ -5,6 +5,7 @@ import './index.css';
 import Library from './pages/Library';
 import BookDetail from './pages/BookDetail';
 import Voices from './pages/Voices';
+import VoiceExpert from './pages/VoiceExpert';
 import Queue from './pages/Queue';
 import Exports from './pages/Exports';
 import Settings from './pages/Settings';
@@ -38,6 +39,7 @@ function App() {
             <Route path="/queue" element={<Queue />} />
             <Route path="/exports" element={<Exports />} />
             <Route path="/voices" element={<Voices />} />
+            <Route path="/voices/:id/expert" element={<VoiceExpert />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

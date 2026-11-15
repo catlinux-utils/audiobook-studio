@@ -53,7 +53,21 @@ export interface VoiceRow {
   name: string;
   wav_path: string;
   reference_text: string;
+  /** JSON-encoded expert synthesis options (see tts/voiceOptions.ts). */
+  synth_options: string | null;
   created_at: string;
+}
+
+export interface VoiceTakeRow {
+  id: string;
+  voice_id: string;
+  created_at: string;
+  text: string;
+  language: string | null;
+  options_json: string;
+  wav_path: string;
+  duration_ms: number;
+  qa_json: string | null;
 }
 
 export interface JobRow {
@@ -158,6 +172,22 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE chunks ADD COLUMN qa TEXT;
   ALTER TABLE exports ADD COLUMN qa_summary TEXT;
+  `,
+  // 006 — expert mode: per-voice synthesis options + saved experiment takes
+  `
+  ALTER TABLE voices ADD COLUMN synth_options TEXT;
+  CREATE TABLE voice_takes (
+    id TEXT PRIMARY KEY,
+    voice_id TEXT NOT NULL REFERENCES voices(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    text TEXT NOT NULL,
+    language TEXT,
+    options_json TEXT NOT NULL,
+    wav_path TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    qa_json TEXT
+  );
+  CREATE INDEX idx_voice_takes_voice ON voice_takes(voice_id, created_at);
   `,
 ];
 
