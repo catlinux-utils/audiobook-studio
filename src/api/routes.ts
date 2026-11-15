@@ -418,6 +418,36 @@ export function registerRoutes(app: FastifyInstance): void {
     return { id: chapterId, title };
   });
 
+  /**
+   * Replace a chapter's text: re-splits it into fresh parts (book's chunk
+   * size). Generated audio of this chapter is dropped — the text no longer
+   * matches it. Refuses while parts are mid-generation.
+   */
+  app.put('/api/books/:id/chapters/:chapterId/text', async (req, reply) => {
+    const { id, chapterId } = req.params as { id: string; chapterId: string };
+    const body = (req.body ?? {}) as { text?: string };
+    const text = (body.text ?? '').replace(/\r\n/g, '\n').trim();
+    if (!text) return reply.code(400).send({ error: 'text is required' });
+    if (text.length > 400_000) return reply.code(413).send({ error: 'text too long (max ~400k chars)' });
+    const db = getDb();
+    const chapter = db.prepare('SELECT * FROM chapters WHERE id=? AND book_id=?').get(chapterId, id) as unknown as ChapterRow | undefined;
+    if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
+    const generating = db
+      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=? AND status='generating'")
+      .get(chapterId) as unknown as { n: number };
+    if (generating.n > 0) return reply.code(409).send({ error: 'parts of this chapter are generating right now — pause or wait first' });
+
+    const olds = db.prepare('SELECT audio_path FROM chunks WHERE chapter_id=?').all(chapterId) as unknown as Array<{ audio_path: string | null }>;
+    for (const o of olds) if (o.audio_path) fs.rmSync(o.audio_path, { force: true });
+    db.prepare('DELETE FROM chunks WHERE chapter_id=?').run(chapterId);
+
+    const book = db.prepare('SELECT max_chunk_chars FROM books WHERE id=?').get(id) as unknown as { max_chunk_chars: number };
+    const chunkCount = rechunkChapterText(chapterId, id, text, book.max_chunk_chars);
+    queue.refreshBookStatus(id);
+    bus.emit('event', { type: 'book.update', bookId: id });
+    return { ok: true, chunkCount };
+  });
+
   app.post('/api/books/:id/generate', async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
@@ -834,6 +864,32 @@ export function registerRoutes(app: FastifyInstance): void {
     const result = await queue.regenerateChunk(id, body.seed || undefined);
     if ('error' in result) return reply.code(409).send(result);
     return { ok: true };
+  });
+
+  /** Edit a part's text. Audio generated for the old text is dropped (status → pending). */
+  app.patch('/api/chunks/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { text?: string };
+    const text = (body.text ?? '').replace(/\r\n/g, '\n').trim();
+    if (!text) return reply.code(400).send({ error: 'text is required' });
+    if (text.length > 8000) return reply.code(413).send({ error: 'part text too long (max 8000 chars) — edit the chapter instead' });
+    const db = getDb();
+    const chunk = db.prepare('SELECT * FROM chunks WHERE id=?').get(id) as unknown as ChunkRow | undefined;
+    if (!chunk) return reply.code(404).send({ error: 'chunk not found' });
+    if (chunk.status === 'generating') return reply.code(409).send({ error: 'part is generating right now — wait or pause first' });
+    if (text === chunk.text.trim()) return { ok: true, changed: false };
+
+    if (chunk.audio_path) fs.rmSync(chunk.audio_path, { force: true });
+    db.prepare(
+      "UPDATE chunks SET text=?, char_end=char_start+?, status='pending', audio_path=NULL, duration_ms=NULL, error=NULL, qa=NULL WHERE id=?",
+    ).run(text, text.length, id);
+    db.prepare('UPDATE chapters SET char_count=(SELECT COALESCE(SUM(LENGTH(text)),0) FROM chunks WHERE chapter_id=?) WHERE id=?').run(
+      chunk.chapter_id, chunk.chapter_id,
+    );
+    queue.refreshBookStatus(chunk.book_id);
+    bus.emit('event', { type: 'chunk.update', bookId: chunk.book_id, chapterId: chunk.chapter_id, chunkId: id, status: 'pending', durationMs: null });
+    bus.emit('event', { type: 'book.update', bookId: chunk.book_id });
+    return { ok: true, changed: true };
   });
 
   /** Word-completeness check: transcribe the generated audio and diff against the chunk text. */
@@ -1346,6 +1402,19 @@ function clampInt(v: number, min: number, max: number): number {
 }
 function clampNum(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(v) ? v : min));
+}
+
+/** Re-split one chapter's (new) text into chunks; returns the chunk count. */
+function rechunkChapterText(chapterId: string, bookId: string, text: string, maxChunkChars: number): number {
+  const db = getDb();
+  const chunks = chunkText(text, maxChunkChars);
+  chunks.forEach((chunk, ki) => {
+    db.prepare(
+      'INSERT INTO chunks (id, book_id, chapter_id, idx, text, char_start, char_end, status) VALUES (?,?,?,?,?,?,?,?)',
+    ).run(randomUUID(), bookId, chapterId, ki, chunk.text, chunk.charStart, chunk.charEnd, 'pending');
+  });
+  db.prepare('UPDATE chapters SET char_count=? WHERE id=?').run(text.length, chapterId);
+  return chunks.length;
 }
 
 function insertChaptersAndChunks(bookId: string, chapters: Array<{ title: string; text: string }>, maxChunkChars: number): void {

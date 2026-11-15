@@ -198,7 +198,7 @@ export class TtsQueue {
   }
 
   /** Book status follows its jobs: running → generating, queued → queued, else by chunk leftovers. */
-  private refreshBookStatus(bookId: string): 'generating' | 'queued' | 'paused' | 'done' {
+  refreshBookStatus(bookId: string): 'generating' | 'queued' | 'paused' | 'done' {
     const db = getDb();
     const counts = db
       .prepare(

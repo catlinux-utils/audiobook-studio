@@ -304,6 +304,9 @@ export const api = {
   regenerateChunk: (id: string, seed?: string) =>
     req<{ ok: boolean }>('POST', `/api/chunks/${id}/regenerate`, seed ? { seed } : {}),
   chunkQa: (id: string) => req<ChunkQa>('POST', `/api/chunks/${id}/qa`),
+  editChunk: (id: string, text: string) => req<{ ok: boolean; changed: boolean }>('PATCH', `/api/chunks/${id}`, { text }),
+  setChapterText: (bookId: string, chapterId: string, text: string) =>
+    req<{ ok: boolean; chunkCount: number }>('PUT', `/api/books/${bookId}/chapters/${chapterId}/text`, { text }),
 
   listVoices: () => req<Voice[]>('GET', '/api/voices'),
   getVoice: (id: string) => req<VoiceDetail>('GET', `/api/voices/${id}`),
