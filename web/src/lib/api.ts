@@ -52,6 +52,29 @@ export interface Voice {
   created_at: string;
 }
 
+export interface JobStats {
+  state: string;
+  done: number;
+  total: number;
+  failed: number;
+  audioMs: number;
+  wallMs: number;
+  speedFactor: number | null;
+  etaMs: number | null;
+}
+
+export interface Stats {
+  lifetime: {
+    books: number;
+    chunks_done: number;
+    chunks_failed: number;
+    audio_ms: number;
+    genWallMs: number;
+    speedFactor: number | null;
+  };
+  jobs: Array<JobStats & { jobId: string; bookId: string; title: string }>;
+}
+
 export interface Settings {
   ttsMode: 'managed' | 'external';
   managedPort: number;
@@ -104,11 +127,12 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
 
 export const api = {
   health: () => req<Health>('GET', '/api/health'),
+  getStats: () => req<Stats>('GET', '/api/stats'),
   getSettings: () => req<Settings>('GET', '/api/settings'),
   putSettings: (s: Partial<Settings>) => req<Settings>('PUT', '/api/settings', s),
 
   listBooks: () => req<Book[]>('GET', '/api/books'),
-  getBook: (id: string) => req<Book & { chapters: Chapter[] }>('GET', `/api/books/${id}`),
+  getBook: (id: string) => req<Book & { chapters: Chapter[]; job?: JobStats | null }>('GET', `/api/books/${id}`),
   getChapter: (bookId: string, chapterId: string) =>
     req<{ chapter: Chapter; chunks: Chunk[] }>('GET', `/api/books/${bookId}/chapters/${chapterId}`),
   updateBook: (id: string, patch: Record<string, unknown>) => req<Book>('PATCH', `/api/books/${id}`, patch),

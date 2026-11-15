@@ -62,12 +62,21 @@ export class TtsQueue {
       .get(bookId) as unknown as { id: string } | undefined;
     if (!job) {
       const id = randomUUID();
+      const now = new Date().toISOString();
       db.prepare(
-        'INSERT INTO jobs (id, book_id, state, total_chunks, done_chunks, failed_chunks, created_at) VALUES (?,?,?,?,?,?,?)',
-      ).run(id, bookId, 'running', pending.n, 0, 0, new Date().toISOString());
+        'INSERT INTO jobs (id, book_id, state, total_chunks, done_chunks, failed_chunks, created_at, started_at) VALUES (?,?,?,?,?,?,?,?)',
+      ).run(id, bookId, 'running', pending.n, 0, 0, now, now);
       job = { id };
     } else {
-      db.prepare("UPDATE jobs SET state='running' WHERE id=?").run(job.id);
+      // close any stale open segment (e.g. after a crash), then open a fresh one
+      db.prepare(
+        `UPDATE jobs SET wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER)
+         WHERE id=? AND started_at IS NOT NULL`,
+      ).run(job.id);
+      db.prepare("UPDATE jobs SET state='running', started_at=?, finished_at=NULL WHERE id=?").run(
+        new Date().toISOString(),
+        job.id,
+      );
     }
     this.pausedJobs.delete(job.id);
     db.prepare("UPDATE books SET status='generating', updated_at=? WHERE id=?").run(new Date().toISOString(), bookId);
@@ -85,7 +94,12 @@ export class TtsQueue {
       .get(bookId) as unknown as { id: string } | undefined;
     if (job) {
       this.pausedJobs.add(job.id);
-      db.prepare("UPDATE jobs SET state='paused' WHERE id=?").run(job.id);
+      db.prepare(
+        `UPDATE jobs SET state='paused',
+           wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
+           started_at = NULL
+         WHERE id=?`,
+      ).run(job.id);
     }
     db.prepare("UPDATE books SET status='paused', updated_at=? WHERE id=?").run(new Date().toISOString(), bookId);
     this.emit({ type: 'book.update', bookId, status: 'paused' });
@@ -99,7 +113,13 @@ export class TtsQueue {
       .get(bookId) as unknown as { id: string } | undefined;
     if (job) {
       this.pausedJobs.delete(job.id);
-      db.prepare("UPDATE jobs SET state='canceled' WHERE id=?").run(job.id);
+      db.prepare(
+        `UPDATE jobs SET state='canceled',
+           wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
+           started_at = NULL,
+           finished_at = ?
+         WHERE id=?`,
+      ).run(new Date().toISOString(), job.id);
     }
     db.prepare("UPDATE chunks SET status='pending', error=NULL WHERE book_id=? AND status='generating'").run(bookId);
     const remaining = db
@@ -182,8 +202,8 @@ export class TtsQueue {
 
   private async runChunk(chunk: ChunkRow, jobId: string): Promise<void> {
     try {
-      await this.synthesizeChunk(chunk);
-      this.noteChunkDone(jobId, chunk);
+      const { durationMs } = await this.synthesizeChunk(chunk);
+      this.noteChunkDone(jobId, chunk, durationMs);
     } catch (err) {
       this.noteChunkFailed(jobId, chunk, err);
     } finally {
@@ -192,7 +212,7 @@ export class TtsQueue {
   }
 
   /** Shared synthesis path for queue chunks and single regenerations. */
-  private async synthesizeChunk(chunk: ChunkRow, seedOverride?: string): Promise<void> {
+  private async synthesizeChunk(chunk: ChunkRow, seedOverride?: string): Promise<{ durationMs: number }> {
     const db = getDb();
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(chunk.book_id) as unknown as BookRow;
     const settings = loadSettings();
@@ -264,7 +284,7 @@ export class TtsQueue {
         "UPDATE chunks SET status='done', audio_path=?, duration_ms=?, error=NULL, attempts=attempts+1 WHERE id=?",
       )
       .run(file, info.durationMs, chunk.id);
-    if (updated.changes === 0) return;
+    if (updated.changes === 0) return { durationMs: info.durationMs };
     this.emit({
       type: 'chunk.update',
       bookId: chunk.book_id,
@@ -273,11 +293,12 @@ export class TtsQueue {
       status: 'done',
       durationMs: info.durationMs,
     });
+    return { durationMs: info.durationMs };
   }
 
-  private noteChunkDone(jobId: string, chunk: ChunkRow): void {
+  private noteChunkDone(jobId: string, chunk: ChunkRow, durationMs: number): void {
     const db = getDb();
-    db.prepare('UPDATE jobs SET done_chunks=done_chunks+1 WHERE id=?').run(jobId);
+    db.prepare('UPDATE jobs SET done_chunks=done_chunks+1, audio_ms=audio_ms+? WHERE id=?').run(durationMs, jobId);
     this.finishJobIfComplete(chunk.book_id, jobId);
   }
 
@@ -313,7 +334,12 @@ export class TtsQueue {
     if (counts.pending > 0) return;
     const job = db.prepare('SELECT state FROM jobs WHERE id=?').get(jobId) as unknown as { state: string } | undefined;
     if (!job || job.state === 'canceled' || job.state === 'done') return;
-    db.prepare("UPDATE jobs SET state='done' WHERE id=?").run(jobId);
+    db.prepare(
+      `UPDATE jobs SET state='done', finished_at=?,
+         wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
+         started_at = NULL
+       WHERE id=?`,
+    ).run(new Date().toISOString(), jobId);
     // a book with failed chunks is not "done" — pause it so the user can retry
     const status = counts.failed > 0 ? 'paused' : 'done';
     db.prepare("UPDATE books SET status=?, updated_at=? WHERE id=?").run(status, new Date().toISOString(), bookId);

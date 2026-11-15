@@ -37,6 +37,28 @@ export function formatDuration(ms: number | null | undefined): string {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** Wall-clock span in human units ("4m 12s", "1h 03m"). */
+export function formatSpan(ms: number | null | undefined): string {
+  if (!ms || ms <= 0) return '—';
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
+export function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="rounded-xl bg-zinc-900 border border-zinc-800 px-4 py-3">
+      <div className="text-xs uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="text-xl font-semibold mt-0.5">{value}</div>
+      {sub && <div className="text-xs text-zinc-500 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
 export function Button({
   children,
   onClick,

@@ -49,6 +49,66 @@ export function registerRoutes(app: FastifyInstance): void {
     return publicSettings(next);
   });
 
+  // ---------- stats ----------
+  app.get('/api/stats', async () => {
+    const db = getDb();
+    const lifetime = db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM books) AS books,
+           (SELECT COUNT(*) FROM chunks WHERE status='done') AS chunks_done,
+           (SELECT COUNT(*) FROM chunks WHERE status='failed') AS chunks_failed,
+           (SELECT COALESCE(SUM(duration_ms),0) FROM chunks WHERE status='done') AS audio_ms`,
+      )
+      .get() as unknown as { books: number; chunks_done: number; chunks_failed: number; audio_ms: number };
+
+    type JobStat = {
+      id: string; book_id: string; state: string; total_chunks: number; done_chunks: number;
+      failed_chunks: number; audio_ms: number; wall_ms: number; started_at: string | null;
+    };
+    const allJobs = db
+      .prepare(
+        `SELECT j.*, b.title FROM jobs j JOIN books b ON b.id=j.book_id
+         WHERE j.audio_ms > 0 ORDER BY j.created_at DESC`,
+      )
+      .all() as unknown as Array<JobStat & { title: string }>;
+
+    const now = Date.now();
+    const jobStats = allJobs.map((j) => {
+      const liveWall = j.wall_ms + (j.started_at ? now - Date.parse(j.started_at) : 0);
+      const speed = liveWall > 0 ? j.audio_ms / liveWall : 0; // × realtime
+      const remaining = Math.max(0, j.total_chunks - j.done_chunks);
+      const avgChunkAudio = j.done_chunks > 0 ? j.audio_ms / j.done_chunks : 0;
+      const etaMs = j.state === 'running' && speed > 0 && remaining > 0
+        ? Math.round((remaining * avgChunkAudio) / speed)
+        : null;
+      return {
+        jobId: j.id,
+        bookId: j.book_id,
+        title: j.title,
+        state: j.state,
+        done: j.done_chunks,
+        total: j.total_chunks,
+        failed: j.failed_chunks,
+        audioMs: j.audio_ms,
+        wallMs: liveWall,
+        speedFactor: Math.round(speed * 100) / 100,
+        etaMs,
+      };
+    });
+
+    const genWallMs = jobStats.reduce((a, j) => a + j.wallMs, 0);
+    const genAudioMs = jobStats.reduce((a, j) => a + j.audioMs, 0);
+    return {
+      lifetime: {
+        ...lifetime,
+        genWallMs,
+        speedFactor: genWallMs > 0 ? Math.round((genAudioMs / genWallMs) * 100) / 100 : null,
+      },
+      jobs: jobStats,
+    };
+  });
+
   // ---------- books ----------
   app.get('/api/books', async () => {
     const db = getDb();
@@ -131,7 +191,32 @@ export function registerRoutes(app: FastifyInstance): void {
     const voice = book.voice_id
       ? (db.prepare('SELECT id, name FROM voices WHERE id=?').get(book.voice_id) as unknown as { id: string; name: string } | undefined)
       : undefined;
-    return { ...book, voice: voice ?? null, chapters };
+    const job = db
+      .prepare(
+        `SELECT id, state, total_chunks, done_chunks, failed_chunks, audio_ms, wall_ms, started_at
+         FROM jobs WHERE book_id=? ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(id) as unknown as
+      | { id: string; state: string; total_chunks: number; done_chunks: number; failed_chunks: number; audio_ms: number; wall_ms: number; started_at: string | null }
+      | undefined;
+    let jobStats: { state: string; done: number; total: number; failed: number; audioMs: number; wallMs: number; speedFactor: number | null; etaMs: number | null } | null = null;
+    if (job && job.audio_ms > 0) {
+      const liveWall = job.wall_ms + (job.started_at ? Date.now() - Date.parse(job.started_at) : 0);
+      const speed = liveWall > 0 ? job.audio_ms / liveWall : 0;
+      const remaining = Math.max(0, job.total_chunks - job.done_chunks);
+      const avgChunkAudio = job.done_chunks > 0 ? job.audio_ms / job.done_chunks : 0;
+      jobStats = {
+        state: job.state,
+        done: job.done_chunks,
+        total: job.total_chunks,
+        failed: job.failed_chunks,
+        audioMs: job.audio_ms,
+        wallMs: liveWall,
+        speedFactor: speed > 0 ? Math.round(speed * 100) / 100 : null,
+        etaMs: job.state === 'running' && speed > 0 && remaining > 0 ? Math.round((remaining * avgChunkAudio) / speed) : null,
+      };
+    }
+    return { ...book, voice: voice ?? null, job: jobStats, chapters };
   });
 
   app.get('/api/books/:id/cover', async (req, reply) => {

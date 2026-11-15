@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { api, onStudioEvent, type Book, type Chapter, type Chunk, type QaSample, type Voice } from '../lib/api';
-import { Button, ProgressBar, StatusBadge, formatDuration } from '../components/bits';
+import { api, onStudioEvent, type Book, type Chapter, type Chunk, type JobStats, type QaSample, type Voice } from '../lib/api';
+import { Button, ProgressBar, StatusBadge, formatDuration, formatSpan } from '../components/bits';
 
 export default function BookDetail() {
   const { id = '' } = useParams();
-  const [book, setBook] = useState<(Book & { chapters: Chapter[] }) | null>(null);
+  const [book, setBook] = useState<(Book & { chapters: Chapter[]; job?: JobStats | null }) | null>(null);
   const [chapterId, setChapterId] = useState<string | null>(null);
   const [chapterData, setChapterData] = useState<{ chapter: Chapter; chunks: Chunk[] } | null>(null);
   const [voices, setVoices] = useState<Voice[]>([]);
@@ -98,6 +98,15 @@ export default function BookDetail() {
               {(book.chunks_failed ?? 0) > 0 && <span className="text-red-400"> · {book.chunks_failed} failed</span>}
             </span>
             <span>total audio: {formatDuration(book.duration_ms)}</span>
+            {book.job && book.job.state === 'running' && book.job.speedFactor && (
+              <span className="text-blue-300">
+                {book.job.speedFactor.toFixed(2)}× realtime
+                {book.job.etaMs ? ` · ETA ${formatSpan(book.job.etaMs)}` : ''}
+              </span>
+            )}
+            {book.job && book.job.wallMs > 0 && (
+              <span className="text-zinc-500">{formatSpan(book.job.wallMs)} compute</span>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">

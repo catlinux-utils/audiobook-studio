@@ -133,6 +133,13 @@ const MIGRATIONS: string[] = [
     created_at TEXT NOT NULL
   );
   `,
+  // 002 — job timing stats (generation rate / ETA)
+  `
+  ALTER TABLE jobs ADD COLUMN started_at TEXT;
+  ALTER TABLE jobs ADD COLUMN finished_at TEXT;
+  ALTER TABLE jobs ADD COLUMN audio_ms INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE jobs ADD COLUMN wall_ms INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 let db: DatabaseSync | null = null;
