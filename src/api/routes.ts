@@ -549,10 +549,14 @@ export function registerRoutes(app: FastifyInstance): void {
       | { path: string; format: string }
       | undefined;
     if (!record || !fs.existsSync(record.path)) return reply.code(404).send({ error: 'export not found' });
+    // filenames are Polish — header values must stay Latin-1, so send an ASCII
+    // fallback plus the RFC 5987 UTF-8 form the browser prefers
     const name = path.basename(record.path);
+    const asciiFallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '');
+    const utf8Name = encodeURIComponent(name).replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
     return reply
       .type(record.format === 'm4b' ? 'audio/mp4' : 'audio/mpeg')
-      .header('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
+      .header('Content-Disposition', `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8Name}`)
       .send(fs.createReadStream(record.path));
   });
 
