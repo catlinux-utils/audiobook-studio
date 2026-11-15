@@ -53,6 +53,8 @@ export interface Voice {
 }
 
 export interface Settings {
+  ttsMode: 'managed' | 'external';
+  managedPort: number;
   audiocppUrl: string;
   model: string;
   concurrency: number;
@@ -63,6 +65,7 @@ export interface Settings {
 
 export interface Health {
   ok: boolean;
+  mode?: 'managed' | 'external';
   audiocpp?: { status: string; backend?: string; models?: number; version?: string; git?: string };
   error?: string;
 }

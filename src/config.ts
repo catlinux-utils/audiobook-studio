@@ -20,7 +20,12 @@ function findRoot(start: string): string {
 const root = findRoot(path.dirname(fileURLToPath(import.meta.url)));
 
 export type AppSettings = {
-  /** Base URL of the audio.cpp server (no trailing slash, no /v1). */
+  /** 'managed' = studio spawns its bundled audio.cpp runtime (standalone);
+   *  'external' = point at an already-running audio.cpp server. */
+  ttsMode: 'managed' | 'external';
+  /** Port for the managed TTS server child process. */
+  managedPort: number;
+  /** Base URL of an external audio.cpp server (no trailing slash, no /v1). */
   audiocppUrl: string;
   /** Model id as configured in the audio.cpp server config. */
   model: string;
@@ -35,6 +40,8 @@ export type AppSettings = {
 };
 
 const defaults: AppSettings = {
+  ttsMode: 'managed',
+  managedPort: 8081,
   audiocppUrl: 'http://127.0.0.1:8080',
   model: 'omnivoice',
   concurrency: 1,
@@ -49,6 +56,7 @@ export const paths = {
   books: path.join(root, 'data', 'books'),
   voices: path.join(root, 'data', 'voices'),
   exports: path.join(root, 'data', 'exports'),
+  runtime: path.join(root, 'runtime'),
   db: path.join(root, 'data', 'studio.db'),
 };
 

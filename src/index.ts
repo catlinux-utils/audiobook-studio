@@ -8,6 +8,7 @@ import { loadSettings, ensureDirs } from './config.js';
 import { getDb, closeDb } from './db.js';
 import { registerRoutes } from './api/routes.js';
 import { queue } from './tts/queue.js';
+import { managedServer } from './tts/managed.js';
 
 ensureDirs();
 getDb();
@@ -34,6 +35,7 @@ registerRoutes(app);
 
 const shutdown = async () => {
   await app.close();
+  managedServer.stop();
   closeDb();
   process.exit(0);
 };
@@ -42,9 +44,14 @@ process.on('SIGTERM', shutdown);
 
 app
   .listen({ port: settings.port, host: '127.0.0.1' })
-  .then((addr) => {
+  .then(async (addr) => {
     console.log(`audiobook-studio listening on ${addr}`);
-    console.log(`TTS backend: ${settings.audiocppUrl} (model: ${settings.model})`);
+    if (settings.ttsMode === 'managed') {
+      console.log('TTS mode: managed (bundled audio.cpp runtime, Vulkan)');
+      await managedServer.ensureRunning();
+    } else {
+      console.log(`TTS mode: external (${settings.audiocppUrl}, model: ${settings.model})`);
+    }
   })
   .catch((err) => {
     console.error(err);

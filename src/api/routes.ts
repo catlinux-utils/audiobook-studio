@@ -13,6 +13,7 @@ import { AudioCppClient } from '../tts/audiocpp.js';
 import { readWavInfo } from '../audio/wavmeta.js';
 import { assembleChapter, exportM4b, exportChapterMp3 } from '../audio/assemble.js';
 import { bus } from '../bus.js';
+import { ttsBaseUrl } from '../tts/managed.js';
 
 const MAX_VOICE_WAV_BYTES = 3.5 * 1024 * 1024; // inline voice_ref payloads are capped at 5 MiB base64
 
@@ -20,12 +21,12 @@ export function registerRoutes(app: FastifyInstance): void {
   // ---------- health ----------
   app.get('/api/health', async () => {
     const s = loadSettings();
-    const client = new AudioCppClient(s.audiocppUrl, s.model);
+    const client = new AudioCppClient(ttsBaseUrl(), s.model);
     try {
       const info = await client.health();
-      return { ok: true, audiocpp: info, settings: publicSettings(s) };
+      return { ok: true, mode: s.ttsMode, audiocpp: info, settings: publicSettings(s) };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err), settings: publicSettings(s) };
+      return { ok: false, mode: s.ttsMode, error: err instanceof Error ? err.message : String(err), settings: publicSettings(s) };
     }
   });
 
@@ -35,6 +36,8 @@ export function registerRoutes(app: FastifyInstance): void {
     const body = (req.body ?? {}) as Partial<AppSettings>;
     const current = loadSettings();
     const next: AppSettings = {
+      ttsMode: body.ttsMode === 'external' || body.ttsMode === 'managed' ? body.ttsMode : current.ttsMode,
+      managedPort: clampInt(body.managedPort ?? current.managedPort, 1, 65535),
       audiocppUrl: (body.audiocppUrl ?? current.audiocppUrl).replace(/\/+$/, ''),
       model: body.model ?? current.model,
       concurrency: clampInt(body.concurrency ?? current.concurrency, 1, 8),
@@ -383,7 +386,7 @@ export function registerRoutes(app: FastifyInstance): void {
     const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
     if (!voice) return reply.code(404).send({ error: 'voice not found' });
     const s = loadSettings();
-    const client = new AudioCppClient(s.audiocppUrl, s.model);
+    const client = new AudioCppClient(ttsBaseUrl(), s.model);
     try {
       const wav = await client.synthesize({
         input: (body.text || 'To jest krótki przykład głosu narratora.').slice(0, 300),

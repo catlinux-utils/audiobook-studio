@@ -47,17 +47,32 @@ export default function Settings() {
 
       <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4 mb-6">
         <div className="flex items-center gap-2 mb-3 text-sm">
-          <span className="text-zinc-400">audio.cpp server:</span>
+          <span className="text-zinc-400">TTS server:</span>
           {health?.ok ? (
             <span className="text-emerald-400">
-              ● online — backend {health.audiocpp?.backend ?? '?'} · {health.audiocpp?.models ?? '?'} model(s) · v{health.audiocpp?.version ?? '?'}
+              ● online ({health.mode}) — backend {health.audiocpp?.backend ?? '?'} · {health.audiocpp?.models ?? '?'} model(s) · v{health.audiocpp?.version ?? '?'}
             </span>
           ) : (
             <span className="text-red-400">● offline — {health?.error ?? 'unreachable'}</span>
           )}
         </div>
-        {field('audio.cpp base URL', 'audiocppUrl', 'no /v1 suffix — e.g. http://127.0.0.1:8080')}
-        {field('Model id', 'model', 'the "id" from the audio.cpp server.json models[] list')}
+        <div className="mb-3">
+          <label className="block text-xs text-zinc-400 mb-1">TTS mode</label>
+          <select
+            className="rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm"
+            value={settings.ttsMode}
+            onChange={(e) => setSettings({ ...settings, ttsMode: e.target.value as 'managed' | 'external' })}
+          >
+            <option value="managed">managed — bundled audio.cpp runtime (standalone)</option>
+            <option value="external">external — connect to a running audio.cpp server</option>
+          </select>
+          <div className="text-[11px] text-zinc-600 mt-0.5">
+            managed mode starts the bundled Vulkan runtime automatically; install it once with setup.ps1 / setup.sh
+          </div>
+        </div>
+        {settings.ttsMode === 'managed' && field('Managed TTS port', 'managedPort', 'the studio starts audio.cpp on this port (default 8081)')}
+        {settings.ttsMode === 'external' && field('audio.cpp base URL', 'audiocppUrl', 'no /v1 suffix — e.g. http://127.0.0.1:8080')}
+        {field('Model id', 'model', settings.ttsMode === 'managed' ? 'fixed by the managed config (omnivoice)' : 'the "id" from the audio.cpp server.json models[] list')}
         {field('Concurrency', 'concurrency', 'parallel requests to audio.cpp (1 = sequential; the server queues anyway)')}
         {field('ffmpeg path', 'ffmpegPath', "'ffmpeg' = use PATH")}
         {field('Default chunk size (chars)', 'defaultMaxChunkChars', 'applies to newly added books')}

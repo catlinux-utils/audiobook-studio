@@ -73,6 +73,43 @@ def section(lines: list[str], start: int, end: int) -> str:
 def main() -> None:
     os.makedirs(OUT, exist_ok=True)
 
+    # --- Kochanowski, three short fraszki (16th c., public domain) — tiny test book ---
+    fraszki: list[tuple[str, str]] = []
+    fraska_slugs = [
+        ('O żywocie ludzkim (Fraszki to wszytko…)', 'fraszki-ksiegi-pierwsze-o-zywocie-ludzkim-fraszki-to-wszytko'),
+        ('O żywocie ludzkim (Wieczna Myśli…)', 'fraszki-ksiegi-pierwsze-o-zywocie-ludzkim-wieczna-mysli-ktor'),
+        ('Na zdrowie', 'fraszki-ksiegi-trzecie-na-zdrowie'),
+    ]
+    try:
+        data_dir = os.path.join(os.path.dirname(OUT), 'data')
+        for title, slug in fraska_slugs:
+            with open(os.path.join(data_dir, f'{slug}.txt'), encoding='utf-8') as f:
+                lines = [l.strip() for l in f.read().split('\n')]
+            # drop header (author, collection, poem title) and trailing boilerplate
+            body_started = False
+            body: list[str] = []
+            for line in lines:
+                if not body_started:
+                    if line.startswith('Fraszki') or line.startswith('Nie masz') or line.startswith('Wieczna') or line.startswith('Wino'):
+                        body_started = True
+                        body.append(line)
+                    continue
+                if line.startswith('-----') or line.lower().startswith('uźyto'):
+                    break
+                body.append(line)
+            text = '\n\n'.join(' '.join([l]) for l in body if l).strip()
+            fraszki.append((title, text))
+        if len(fraszki) == 3 and all(len(t) > 200 for _, t in fraszki):
+            build_epub(
+                os.path.join(OUT, 'kochanowski-fraszki-test.epub'),
+                'Fraszki (test)', 'Jan Kochanowski', 'pl',
+                fraszki,
+            )
+        else:
+            print('fraszki download incomplete — skipping small test book')
+    except FileNotFoundError:
+        print('fraszki source texts missing — skipping small test book')
+
     # --- Pan Tadeusz, Ksiega pierwsza (Adam Mickiewicz, 1834, public domain) ---
     pt = read_lines('pan-tadeusz.txt')
     ksiega1 = section(pt, 11, 1057)

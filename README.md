@@ -1,8 +1,9 @@
 # Audiobook Studio
 
-Self-hosted **ebook → audiobook** production studio with a full management WebUI.
-It wraps your local [audio.cpp](https://github.com/0xShug0/audio.cpp) server (e.g. OmniVoice on
-**Vulkan** — no CUDA, no ROCm) and turns EPUB/TXT books into chaptered **.m4b** audiobooks.
+Self-hosted, standalone **ebook → audiobook** production studio with a full management WebUI.
+It runs [audio.cpp](https://github.com/0xShug0/audio.cpp) with OmniVoice on **Vulkan** (no CUDA, no
+ROCm, no PyTorch — installed and auto-started by the studio itself) and turns EPUB/TXT books into
+chaptered **.m4b** audiobooks.
 
 **Contents:** [How it works](#how-it-works) · [Install](#install) · [Usage](#usage) ·
 [Features](#features) · [Architecture](#architecture) · [License](#license)
@@ -10,37 +11,38 @@ It wraps your local [audio.cpp](https://github.com/0xShug0/audio.cpp) server (e.
 ## How it works
 
 ```
-EPUB/TXT ──▶ ingest ──▶ chapters ──▶ sentence-aware chunks ──▶ your audio.cpp server (Vulkan)
+EPUB/TXT ──▶ ingest ──▶ chapters ──▶ sentence-aware chunks ──▶ bundled audio.cpp (Vulkan, auto-started)
                                                                      │  POST /v1/audio/speech
                 library · voices · queue · spot-check  ◀── WebUI ◀───┘  (WAV per chunk)
                                                                      │
                                       chunk WAVs ──▶ ffmpeg ──▶ chaptered .m4b (+cover)
 ```
 
-The studio **never runs a TTS model itself** — it orchestrates your existing audio.cpp server
-(the one from `omnivoice-vulkan`), so the GPU stays where it is and the model stays loaded.
+**Standalone by default**: the studio ships a checksum-pinned installer for the audio.cpp Vulkan
+runtime + OmniVoice model (`versions.json`) and **starts/manages the TTS server itself** as a child
+process on port 8081. No CUDA, no ROCm, no PyTorch, no separate server to run — Vulkan comes with
+your GPU driver. If you already operate an audio.cpp server elsewhere, switch to *external* mode in
+Settings and point at it.
 
 ## Install
 
-Requirements: Node 20+, ffmpeg on PATH, and a running audio.cpp server with an offline TTS model
-(see the `omnivoice-vulkan` repo — `server.bat`).
+Requirements: Node 20+, ffmpeg on PATH, a Vulkan-capable GPU with current drivers, ~4 GB disk.
 
-```bash
+```powershell
+# 1. TTS runtime (downloads audio.cpp + OmniVoice GGUF, checksum-verified)
+powershell -ExecutionPolicy Bypass -File setup.ps1        # Linux: ./setup.sh
+
+# 2. app
 npm install
-npm run seed        # optional: load the public-domain sample books
-npm run build       # build the web UI
-npm start           # serve everything on http://127.0.0.1:8090
+npm run seed        # optional: load the public-domain sample books (incl. a tiny Polish one)
+npm run build
+npm start           # studio on http://127.0.0.1:8090 — TTS server auto-starts on :8081
 ```
 
-Development mode (hot reload, Vite dev server on :5173 proxying /api to :8090):
+Development mode (hot reload, Vite dev server on :5173 proxying /api to :8090): `npm run dev`.
 
-```bash
-npm run dev
-```
-
-First run: open **Settings**, confirm the audio.cpp URL and model id (defaults:
-`http://127.0.0.1:8080`, model `omnivoice`), then add a **Voice** (a short WAV of the narrator +
-its transcript) and you are ready.
+First run: add a **Voice** (a short WAV of the narrator + its transcript) in the Voices page,
+assign it to a book, hit Generate.
 
 ## Usage
 
@@ -75,11 +77,14 @@ its transcript) and you are ready.
 
 | Path | Contents |
 |---|---|
-| `src/` | Fastify server: `ingest/` (epub, txt, chunker), `tts/` (audio.cpp client, queue), `audio/` (wav headers, ffmpeg assembly), `api/` (REST + SSE) |
+| `setup.ps1` / `setup.sh` | Standalone TTS runtime installer (audio.cpp Vulkan + OmniVoice GGUF, checksum-verified) |
+| `versions.json` | Pinned runtime/model versions, URLs, SHA-256 checksums — single source of truth |
+| `src/` | Fastify server: `ingest/` (epub, txt, chunker), `tts/` (audio.cpp client, queue, managed server), `audio/` (wav headers, ffmpeg assembly), `api/` (REST + SSE) |
 | `web/` | React 19 + Vite + Tailwind SPA (Library, Book detail, Voices, Queue, Settings) |
 | `tests/` | Vitest unit tests (chunker edge cases) |
 | `scripts/` | `seed.ts` (load sample books), `make_samples.py` (rebuild sample EPUBs) |
 | `sample-books/` | Public-domain test books (see LICENSES.md) |
+| `runtime/` | Installed audio.cpp binaries + OmniVoice GGUF (gitignored, from setup script) |
 | `data/` | Runtime state: SQLite DB, per-book chunk WAVs, covers, exports (gitignored) |
 
 API: every UI action is a plain REST call (`/api/books`, `/api/voices`, `/api/jobs`-style controls,
@@ -87,5 +92,6 @@ API: every UI action is a plain REST call (`/api/books`, `/api/voices`, `/api/jo
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The studio bundles no models or engines; audio.cpp is Apache-2.0 and
-OmniVoice weights are Apache-2.0 (k2-fsa). Sample books are public domain ([LICENSES.md](sample-books/LICENSES.md)).
+MIT — see [LICENSE](LICENSE). The studio downloads (checksum-verified) but does not modify third-party
+software: audio.cpp is Apache-2.0 and OmniVoice weights are Apache-2.0 (k2-fsa). Sample books are
+public domain ([LICENSES.md](sample-books/LICENSES.md)).

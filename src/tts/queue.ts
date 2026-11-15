@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getDb, type BookRow, type ChunkRow } from '../db.js';
 import { paths, loadSettings } from '../config.js';
+import { ttsBaseUrl } from './managed.js';
 import { AudioCppClient, ServerBusyError, TtsRequestError } from './audiocpp.js';
 import { readWavInfo } from '../audio/wavmeta.js';
 import { bus, type StudioEvent } from '../bus.js';
@@ -31,7 +32,7 @@ export class TtsQueue {
 
   private makeClient(): AudioCppClient {
     const s = loadSettings();
-    return new AudioCppClient(s.audiocppUrl, s.model);
+    return new AudioCppClient(ttsBaseUrl(), s.model);
   }
 
   private recoverOnStartup(): void {
@@ -195,7 +196,7 @@ export class TtsQueue {
     const db = getDb();
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(chunk.book_id) as unknown as BookRow;
     const settings = loadSettings();
-    this.client = new AudioCppClient(settings.audiocppUrl, settings.model);
+    this.client = new AudioCppClient(ttsBaseUrl(), settings.model);
 
     let voiceRefBase64: string | undefined;
     let referenceText: string | undefined;
