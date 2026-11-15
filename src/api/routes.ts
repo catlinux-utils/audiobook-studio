@@ -14,6 +14,7 @@ import { alignTranscript } from '../tts/align.js';
 import { runFfmpeg, qaTake, type WordQa } from '../tts/qa.js';
 import { sanitizeExpertOptions, expertOptionsToRequest, type ExpertOptions } from '../tts/voiceOptions.js';
 import { applyVoiceCleanup, CLEANUP_MAX_BYTES, type CleanupOptions } from '../audio/voiceCleanup.js';
+import { analyzeWav, suggestCleanup } from '../audio/analyze.js';
 import { readWavInfo } from '../audio/wavmeta.js';
 import { assembleChapter, exportM4b, exportChapterMp3 } from '../audio/assemble.js';
 import { bus } from '../bus.js';
@@ -1127,6 +1128,20 @@ export function registerRoutes(app: FastifyInstance): void {
       return reply.code(422).send({ error: err instanceof Error ? err.message : String(err) });
     } finally {
       fs.rmSync(out, { force: true });
+    }
+  });
+
+  /** Measure the reference (loudness, edge silence) and suggest cleanup options. */
+  app.post('/api/voices/:id/analyze', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const voice = getDb().prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
+    if (!voice) return reply.code(404).send({ error: 'voice not found' });
+    try {
+      const analysis = await analyzeWav(voice.wav_path);
+      const suggestion = suggestCleanup(analysis);
+      return { ...analysis, suggestions: suggestion.options, notes: suggestion.notes };
+    } catch (err) {
+      return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 

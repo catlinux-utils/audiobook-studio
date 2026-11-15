@@ -92,6 +92,16 @@ export interface CleanupOptions {
   trimSilence?: boolean;
 }
 
+export interface VoiceAnalysis {
+  durationSec: number;
+  meanDb: number | null;
+  peakDb: number | null;
+  leadingSilenceSec: number;
+  trailingSilenceSec: number;
+  suggestions: CleanupOptions;
+  notes: string[];
+}
+
 export interface JobStats {
   state: string;
   done: number;
@@ -333,6 +343,7 @@ export const api = {
   },
   expertRun: (id: string, args: { text: string; language?: string; seed?: string; options?: ExpertOptions; saveTake?: boolean }) =>
     req<ExpertRunResult>('POST', `/api/voices/${id}/expert-run`, args),
+  analyzeVoice: (id: string) => req<VoiceAnalysis>('POST', `/api/voices/${id}/analyze`),
   listTakes: (id: string) => req<VoiceTake[]>(`GET`, `/api/voices/${id}/takes`),
   deleteTake: (voiceId: string, takeId: string) => req<{ ok: boolean }>('DELETE', `/api/voices/${voiceId}/takes/${takeId}`),
 
