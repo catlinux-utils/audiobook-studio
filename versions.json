@@ -48,5 +48,20 @@
       "sha256": "392e636876d6d5ae8716f0f98b78480b61bb8c199d63f20523e95308b3425c2e",
       "sri": "sha256-OS5jaHbW1a6HFvD5i3hIC2G7jBmdY/IFI+lTCLNCXC4="
     }
+  },
+  "aligner_gguf": {
+    "$comment": "Meta MMS-300M forced aligner (1,130 languages) — word-level transcript verification for voice cloning; Polish is fed as pre-romanized ASCII.",
+    "repo": "audio-cpp/audio.cpp-gguf",
+    "revision": "ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7",
+    "dir": "MMS-Forced-Aligner-GGUF",
+    "model_id": "align",
+    "family": "mms_forced_aligner",
+    "f16": {
+      "filename": "mms-forced-aligner-f16.gguf",
+      "url": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7/MMS-Forced-Aligner-GGUF/mms-forced-aligner-f16.gguf",
+      "size_bytes": 631019392,
+      "sha256": "3faf596c743b5b1e6f959ca4f73be045fddd0068aeafff9da24295253f561e97",
+      "sri": "sha256-P69ZbHQ7Wx5vlZyk9zvgRf3dAGiur/+dokKVJT9WHpc="
+    }
   }
 }

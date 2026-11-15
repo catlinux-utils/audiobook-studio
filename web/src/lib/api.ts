@@ -123,9 +123,39 @@ export interface ChunkQa {
   missing: string[];
   /** words the audio said that are not in the text (ASR noise, garbles) */
   extra: string[];
+  /** "text-word → heard-word" pairs matched within edit tolerance */
+  variants: string[];
   sourceWords: number;
   /** (missing + extra) / source words; null for empty text */
   wer: number | null;
+  /** text words with no spoken counterpart — the hard-failure count */
+  missingCount: number;
+}
+
+export interface AlignedWord {
+  text: string;
+  /** seconds; -1 when the word could not be aligned */
+  start: number;
+  end: number;
+  /** seconds of untranscribed audio before this word */
+  gapBefore: number;
+  suspect: boolean;
+  why: string;
+}
+
+export interface Alignment {
+  words: AlignedWord[];
+  durationSec: number;
+  /** fraction of audio covered by aligned words (0-1) */
+  coverage: number;
+  unaligned: string[];
+  ordered: boolean;
+}
+
+export interface CloneTest {
+  duration_ms: number;
+  qa: ChunkQa | null;
+  audio_base64: string;
 }
 
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -181,6 +211,9 @@ export const api = {
   updateVoice: (id: string, patch: { name?: string; referenceText?: string }) =>
     req<Voice>('PATCH', `/api/voices/${id}`, patch),
   deleteVoice: (id: string) => req<{ ok: boolean }>('DELETE', `/api/voices/${id}`),
+  alignVoice: (id: string) => req<Alignment>('POST', `/api/voices/${id}/align`),
+  testVoice: (id: string, text: string, language?: string) =>
+    req<CloneTest>('POST', `/api/voices/${id}/test`, { text, language }),
 
   uploadBook: async (file: File): Promise<{ id: string }> => {
     const form = new FormData();

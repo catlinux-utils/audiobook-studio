@@ -10,6 +10,8 @@ import { splitTxtChapters } from '../ingest/txt.js';
 import { chunkText } from '../ingest/chunker.js';
 import { queue } from '../tts/queue.js';
 import { AudioCppClient } from '../tts/audiocpp.js';
+import { alignTranscript } from '../tts/align.js';
+import { runFfmpeg, qaTake, type WordQa } from '../tts/qa.js';
 import { readWavInfo } from '../audio/wavmeta.js';
 import { assembleChapter, exportM4b, exportChapterMp3 } from '../audio/assemble.js';
 import { bus } from '../bus.js';
@@ -482,16 +484,10 @@ export function registerRoutes(app: FastifyInstance): void {
       | { language: string }
       | undefined;
 
-    const tmp16 = path.join(paths.data, `qa-${randomUUID()}-16k.wav`);
     try {
-      await ffmpegRun(['-y', '-i', chunk.audio_path, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmp16]);
-      const client = new AudioCppClient(ttsBaseUrl(), 'asr');
-      const transcript = await client.transcribe(tmp16, book?.language || undefined);
-      return { transcript, ...diffWords(chunk.text, transcript) };
+      return await qaTake(chunk.audio_path, chunk.text, book?.language || undefined);
     } catch (err) {
       return reply.code(502).send({ error: `qa failed: ${err instanceof Error ? err.message : String(err)}` });
-    } finally {
-      fs.rmSync(tmp16, { force: true });
     }
   });
 
@@ -605,21 +601,6 @@ export function registerRoutes(app: FastifyInstance): void {
 
   // ---------- voice preparation & auto-transcript ----------
 
-  /** Run ffmpeg with args, capturing stderr for error messages. */
-  function ffmpegRun(args: string[]): Promise<string> {
-    const s = loadSettings();
-    return new Promise((resolve, reject) => {
-      const child = spawn(s.ffmpegPath || 'ffmpeg', args, { windowsHide: true });
-      let stderr = '';
-      child.stderr.on('data', (d: Buffer) => {
-        stderr += d.toString();
-        if (stderr.length > 4000) stderr = stderr.slice(-4000);
-      });
-      child.on('error', (err) => reject(new Error(`ffmpeg not available: ${err.message}`)));
-      child.on('close', (code) => (code === 0 ? resolve(stderr) : reject(new Error(`ffmpeg failed: ${stderr.trim().split('\n').pop() ?? code}`))));
-    });
-  }
-
   /**
    * Prepare a reference clip for cloning: cut [start,end] (seconds), convert
    * to mono 24 kHz 16-bit WAV, optionally normalize loudness, trim edge
@@ -655,7 +636,7 @@ export function registerRoutes(app: FastifyInstance): void {
       if (end !== null && end > start) args.push('-ss', String(start), '-to', String(end));
       else if (start > 0) args.push('-ss', String(start));
       args.push('-af', filters.join(','), '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', tmpOut);
-      await ffmpegRun(args);
+      await runFfmpeg(args);
       const wav = fs.readFileSync(tmpOut);
       if (wav.length > MAX_VOICE_WAV_BYTES) {
         return reply.code(422).send({
@@ -697,7 +678,7 @@ export function registerRoutes(app: FastifyInstance): void {
     fs.writeFileSync(tmp, wav);
     try {
       // Whisper-family models want 16 kHz mono
-      await ffmpegRun(['-y', '-i', tmp, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmp16]);
+      await runFfmpeg(['-y', '-i', tmp, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmp16]);
       const client = new AudioCppClient(ttsBaseUrl(), 'asr');
       const text = await client.transcribe(tmp16, language || undefined);
       return { text };
@@ -706,6 +687,65 @@ export function registerRoutes(app: FastifyInstance): void {
     } finally {
       fs.rmSync(tmp, { force: true });
       fs.rmSync(tmp16, { force: true });
+    }
+  });
+
+  /**
+   * Word-level forced alignment of the reference transcript against the
+   * reference audio (Meta MMS, Polish via pre-romanized ASCII). Exposes each
+   * word's exact position so the UI can play it in isolation and flag words
+   * that don't line up — wrong transcript words are what make clones garble.
+   */
+  app.post('/api/voices/:id/align', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const voice = getDb().prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
+    if (!voice) return reply.code(404).send({ error: 'voice not found' });
+    if (!voice.reference_text.trim()) return reply.code(422).send({ error: 'voice has no transcript to align' });
+    try {
+      return await alignTranscript(voice.wav_path, voice.reference_text);
+    } catch (err) {
+      return reply.code(502).send({ error: `align failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  });
+
+  /**
+   * Clone round-trip test: synthesize a short sentence with this voice, then
+   * transcribe it back and diff against the sentence. The score shows whether
+   * the clone itself drops/garbles words BEFORE committing to a full book.
+   */
+  app.post('/api/voices/:id/test', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { text?: string; language?: string; seed?: string };
+    const db = getDb();
+    const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
+    if (!voice) return reply.code(404).send({ error: 'voice not found' });
+    const text =
+      (body.text ?? '').trim() ||
+      'O żywocie ludzkim. Fraszki to wszytko, cokolwiek myślemy, fraszki to wszytko, cokolwiek czyniemy. Zacność, uroda, moc, pieniądze, sława, wszystko to minie jako polna trawa.';
+    const settings = loadSettings();
+    const tmp = path.join(paths.data, `clone-test-${randomUUID()}.wav`);
+    try {
+      const client = new AudioCppClient(ttsBaseUrl(), settings.model);
+      const wav = await client.synthesize({
+        input: text,
+        language: body.language || undefined,
+        voiceRefBase64: fs.readFileSync(voice.wav_path).toString('base64'),
+        referenceText: voice.reference_text || undefined,
+        seed: body.seed || undefined,
+      });
+      fs.writeFileSync(tmp, wav);
+      const info = readWavInfo(wav);
+      let qa: WordQa | null = null;
+      try {
+        qa = await qaTake(tmp, text, body.language || undefined);
+      } catch {
+        qa = null; // ASR unavailable — still return the audio
+      }
+      return { duration_ms: info.durationMs, qa, audio_base64: wav.toString('base64') };
+    } catch (err) {
+      return reply.code(502).send({ error: `clone test failed: ${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      fs.rmSync(tmp, { force: true });
     }
   });
 
@@ -793,88 +833,6 @@ function rechunkBook(bookId: string, maxChunkChars: number): void {
   db.prepare('DELETE FROM chunks WHERE book_id=?').run(bookId);
   db.prepare('DELETE FROM chapters WHERE book_id=?').run(bookId);
   insertChaptersAndChunks(bookId, chapters, maxChunkChars);
-}
-
-interface WordDiff {
-  /** consecutive missing words grouped into phrases */
-  missing: string[];
-  extra: string[];
-  sourceWords: number;
-  /** (missing + extra) / source words; null for empty chunks */
-  wer: number | null;
-}
-
-function tokenizeWords(s: string): string[] {
-  return s
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-/**
- * Word-level completeness diff between the chunk text and what the ASR heard
- * in the generated audio. CrisperWhisper verbatim markers ("[UH]",
- * "[lipsmack]") are dropped, immediate stutter repeats collapse. LCS alignment
- * so missing words come back in reading order, grouped into phrases.
- */
-function diffWords(sourceText: string, transcript: string): WordDiff {
-  const src = tokenizeWords(sourceText);
-  const spoken = tokenizeWords(transcript.replace(/\[[^\]]*\]/g, ' ')).filter((w, i, arr) => w !== arr[i - 1]);
-  const m = src.length;
-  const n = spoken.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
-  for (let i = m - 1; i >= 0; i--) {
-    for (let j = n - 1; j >= 0; j--) {
-      dp[i]![j] = src[i] === spoken[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
-    }
-  }
-  const missingWords: string[] = [];
-  const extraWords: string[] = [];
-  // anchor = spoken-stream position where the deviation happened, so missing
-  // words from different places don't merge into one fake phrase
-  const missingAt: number[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < m && j < n) {
-    if (src[i] === spoken[j]) {
-      i++;
-      j++;
-    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
-      missingWords.push(src[i]!);
-      missingAt.push(j);
-      i++;
-    } else {
-      extraWords.push(spoken[j]!);
-      j++;
-    }
-  }
-  while (i < m) {
-    missingWords.push(src[i++]!);
-    missingAt.push(n);
-  }
-  while (j < n) extraWords.push(spoken[j++]!);
-  // group consecutive deviations (same anchor) into phrases for display
-  const group = (ws: string[], anchors: number[]): string[] => {
-    const out: string[] = [];
-    let cur = '';
-    for (let k = 0; k < ws.length; k++) {
-      if (cur && anchors[k] !== anchors[k - 1]) {
-        out.push(cur);
-        cur = '';
-      }
-      cur = cur ? `${cur} ${ws[k]}` : ws[k]!;
-    }
-    if (cur) out.push(cur);
-    return out;
-  };
-  return {
-    missing: group(missingWords, missingAt),
-    extra: extraWords,
-    sourceWords: m,
-    wer: m > 0 ? Number(((missingWords.length + extraWords.length) / m).toFixed(3)) : null,
-  };
 }
 
 function neighborIds(chunkId: string): { prev: string | null; next: string | null } {

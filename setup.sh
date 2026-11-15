@@ -131,6 +131,23 @@ if [ "$SKIP_MODEL" -ne 1 ]; then
         [ "$(sha256_of "$ASR_DEST")" = "$SHA256" ] || { echo "ASR model install failed final checksum" >&2; exit 1; }
         echo "[ok] ASR model installed -> $ASR_DEST"
     fi
+
+    # --- 4. Forced aligner (word-level transcript verification for cloning) ---
+    eval "$(read_spec "versions['aligner_gguf']['f16']")"
+    ALIGN_DIR="runtime/models/$(python3 -c 'import json; print(json.load(open("versions.json"))["aligner_gguf"]["dir"])')"
+    mkdir -p "$ALIGN_DIR"
+    ALIGN_DEST="$ALIGN_DIR/$FILENAME"
+    ALIGN_OK=0
+    if [ "$FORCE" -ne 1 ] && [ -f "$ALIGN_DEST" ] && [ "$(sha256_of "$ALIGN_DEST")" = "$SHA256" ]; then
+        echo "[ok] forced aligner already installed (checksum matches)"
+        ALIGN_OK=1
+    fi
+    if [ "$ALIGN_OK" -ne 1 ]; then
+        fetch "$CACHE/$FILENAME" "$URL" "$SHA256" "MMS forced aligner model"
+        mv "$CACHE/$FILENAME" "$ALIGN_DEST"
+        [ "$(sha256_of "$ALIGN_DEST")" = "$SHA256" ] || { echo "Forced aligner install failed final checksum" >&2; exit 1; }
+        echo "[ok] forced aligner installed -> $ALIGN_DEST"
+    fi
 fi
 
 echo "=== done — the studio will start this runtime automatically ==="

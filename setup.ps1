@@ -130,6 +130,27 @@ if (-not $SkipModel) {
         if ((Get-Sha256 $asrDest) -ne $asrSpec.sha256) { throw 'ASR model install failed final checksum' }
         Write-Host "[ok] ASR model installed -> $asrDest"
     }
+
+    # --- 4. Forced aligner (word-level transcript verification for cloning) ---
+    $alignSpec = $versions.aligner_gguf.f16
+    $alignDir = Join-Path $root ("runtime\models\" + $versions.aligner_gguf.dir)
+    New-Item -ItemType Directory -Force -Path $alignDir | Out-Null
+    $alignDest = Join-Path $alignDir $alignSpec.filename
+    $alignOk = $false
+    if (-not $Force -and (Test-Path $alignDest)) {
+        if ((Get-Sha256 $alignDest) -eq $alignSpec.sha256) {
+            Write-Host "[ok] forced aligner already installed (checksum matches)"
+            $alignOk = $true
+        } else {
+            Write-Host "[..] installed forced aligner failed checksum, re-downloading"
+        }
+    }
+    if (-not $alignOk) {
+        $alignCache = Get-CachedArtifact $alignSpec "MMS forced aligner model"
+        Move-Item -Path $alignCache -Destination $alignDest -Force
+        if ((Get-Sha256 $alignDest) -ne $alignSpec.sha256) { throw 'Forced aligner install failed final checksum' }
+        Write-Host "[ok] forced aligner installed -> $alignDest"
+    }
 }
 
 Write-Host '=== done — the studio will start this runtime automatically ==='

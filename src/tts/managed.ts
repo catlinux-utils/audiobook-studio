@@ -47,6 +47,13 @@ class ManagedServer {
     return dir;
   }
 
+  /** Forced aligner (Meta MMS) — optional; enables word-level transcript verification. */
+  private alignerModelDir(): string | null {
+    const dir = path.join(paths.runtime, 'models', 'MMS-Forced-Aligner-GGUF');
+    if (!fs.existsSync(dir) || !fs.readdirSync(dir).some((f) => f.endsWith('.gguf'))) return null;
+    return dir;
+  }
+
   /** Generate runtime/server.json from current settings. */
   writeConfig(port: number): void {
     const model = this.modelPath();
@@ -74,6 +81,16 @@ class ManagedServer {
         family: versions.asr_gguf?.family ?? 'crisperwhisper',
         path: asrDir,
         task: 'asr',
+        mode: 'offline',
+      });
+    }
+    const alignerDir = this.alignerModelDir();
+    if (alignerDir) {
+      models.push({
+        id: 'align',
+        family: 'mms_forced_aligner',
+        path: alignerDir,
+        task: 'align',
         mode: 'offline',
       });
     }
