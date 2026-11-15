@@ -401,6 +401,21 @@ export function registerRoutes(app: FastifyInstance): void {
     if ('error' in result) return reply.code(409).send(result);
     return result;
   });
+  /** Queue an explicit selection of chunks (user-picked parts) as one job. */
+  app.post('/api/books/:id/queue-chunks', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const db = getDb();
+    const book = db.prepare('SELECT * FROM books WHERE id=?').get(id) as unknown as BookRow | undefined;
+    if (!book) return reply.code(404).send({ error: 'book not found' });
+    if (!book.voice_id) return reply.code(400).send({ error: 'assign a voice first' });
+    const body = (req.body ?? {}) as { chunkIds?: unknown };
+    const chunkIds = Array.isArray(body.chunkIds) ? body.chunkIds.map(String) : [];
+    if (chunkIds.length === 0) return reply.code(400).send({ error: 'chunkIds is required' });
+    const result = queue.startChunks(id, chunkIds);
+    if ('error' in result) return reply.code(409).send(result);
+    return result;
+  });
+
   app.post('/api/books/:id/pause', async (req) => queue.pauseBook((req.params as { id: string }).id) ?? { ok: true });
   app.post('/api/books/:id/cancel', async (req) => queue.cancelBook((req.params as { id: string }).id) ?? { ok: true });
 

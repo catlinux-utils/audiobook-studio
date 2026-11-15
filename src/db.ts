@@ -144,6 +144,14 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE jobs ADD COLUMN chapter_id TEXT;
   `,
+  // 004 — chunk-selection jobs: explicit list of chunk ids to generate
+  `
+  CREATE TABLE job_chunks (
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    PRIMARY KEY (job_id, chunk_id)
+  );
+  `,
 ];
 
 let db: DatabaseSync | null = null;

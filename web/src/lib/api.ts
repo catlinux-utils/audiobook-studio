@@ -197,6 +197,8 @@ export const api = {
   generate: (id: string) => req<{ jobId?: string; error?: string }>('POST', `/api/books/${id}/generate`),
   generateChapter: (bookId: string, chapterId: string) =>
     req<{ jobId?: string; error?: string }>('POST', `/api/books/${bookId}/chapters/${chapterId}/generate`),
+  queueChunks: (bookId: string, chunkIds: string[]) =>
+    req<{ jobId: string }>('POST', `/api/books/${bookId}/queue-chunks`, { chunkIds }),
   pause: (id: string) => req('POST', `/api/books/${id}/pause`),
   cancel: (id: string) => req('POST', `/api/books/${id}/cancel`),
   rechunk: (id: string) => req('POST', `/api/books/${id}/rechunk`),

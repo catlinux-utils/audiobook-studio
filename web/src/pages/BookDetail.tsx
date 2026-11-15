@@ -20,6 +20,8 @@ export default function BookDetail() {
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [editChapterTitle, setEditChapterTitle] = useState('');
   const [exports, setExports] = useState<Array<{ id: string; path: string; duration_ms: number; chapter_count: number; created_at: string }>>([]);
+  const [selectedChapters, setSelectedChapters] = useState<Set<string>>(new Set());
+  const [selectedChunks, setSelectedChunks] = useState<Set<string>>(new Set());
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const refreshBook = useCallback(() => {
@@ -54,6 +56,11 @@ export default function BookDetail() {
   useEffect(() => {
     refreshChapter();
   }, [chapterId, refreshChapter]);
+
+  // chunk selections belong to the visible chapter — reset on switch
+  useEffect(() => {
+    setSelectedChunks(new Set());
+  }, [chapterId]);
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(label);
@@ -93,6 +100,30 @@ export default function BookDetail() {
       setQaBusy(false);
     }
   };
+
+  /** Queue every checked chapter, in list order; already-queued ones are skipped. */
+  const queueSelectedChapters = async () => {
+    const ids = [...selectedChapters];
+    const errors: string[] = [];
+    for (const cid of ids) {
+      try {
+        await api.generateChapter(id, cid);
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    setSelectedChapters(new Set());
+    refreshBook();
+    if (errors.length) setError(errors.join(' · '));
+  };
+
+  /** Queue the checked parts of this chapter as one job (done parts regenerate). */
+  const queueSelectedChunks = () =>
+    act('queue-sel', async () => {
+      await api.queueChunks(id, [...selectedChunks]);
+      setSelectedChunks(new Set());
+      refreshBook();
+    });
 
   if (!book) return <div className="text-zinc-400">{error || 'Loading…'}</div>;
 
@@ -296,15 +327,49 @@ export default function BookDetail() {
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5">
         {/* ---- chapters + settings column ---- */}
         <div>
-          <Panel title="Chapters">
+          <Panel
+            title="Chapters"
+            right={
+              selectedChapters.size > 0 ? (
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    disabled={busy !== '' || !book.voice_id}
+                    onClick={queueSelectedChapters}
+                    title={book.voice_id ? `add ${selectedChapters.size} selected chapter(s) to the generation queue` : 'assign a voice first'}
+                  >
+                    ⚡ queue selected ({selectedChapters.size})
+                  </Button>
+                  <button className="text-xs text-zinc-400 hover:underline" onClick={() => setSelectedChapters(new Set())}>
+                    ✕
+                  </button>
+                </div>
+              ) : undefined
+            }
+          >
             <div className="max-h-[420px] overflow-y-auto space-y-1">
               {book.chapters.map((c) => (
                 <div
                   key={c.id}
-                  className={`w-full rounded-lg px-3 py-2 transition-colors ${
+                  className={`w-full rounded-lg px-3 py-2 transition-colors flex items-start gap-2 ${
                     chapterId === c.id ? 'bg-zinc-700' : 'hover:bg-zinc-800'
                   }`}
                 >
+                  <input
+                    type="checkbox"
+                    className="mt-1 shrink-0 accent-emerald-500"
+                    checked={selectedChapters.has(c.id)}
+                    onChange={() =>
+                      setSelectedChapters((s) => {
+                        const next = new Set(s);
+                        if (next.has(c.id)) next.delete(c.id);
+                        else next.add(c.id);
+                        return next;
+                      })
+                    }
+                    title="select for queueing"
+                  />
+                  <div className="flex-1 min-w-0">
                   {editingChapterId === c.id ? (
                     <div className="flex items-center gap-2">
                       <input
@@ -355,6 +420,7 @@ export default function BookDetail() {
                   <div className="text-xs text-zinc-500 mt-0.5">
                     {c.chunks_done}/{c.chunk_count} · {formatDuration(c.duration_ms)}
                     {c.chunks_failed > 0 && <span className="text-red-400"> · {c.chunks_failed} failed</span>}
+                  </div>
                   </div>
                 </div>
               ))}
@@ -416,9 +482,40 @@ export default function BookDetail() {
             >
               {chapterData.chunks.length > 0 && <ChunkTimeline chunks={chapterData.chunks} onSeek={(ms) => seekChapter(ms)} />}
               <audio ref={audioRef} controls className="w-full mt-3 mb-4" />
+              {selectedChunks.size > 0 && (
+                <div className="flex items-center gap-2 mb-2 rounded-lg bg-emerald-950/40 border border-emerald-900 px-3 py-1.5 text-sm">
+                  <span className="text-emerald-300">{selectedChunks.size} part{selectedChunks.size > 1 ? 's' : ''} selected</span>
+                  <Button
+                    variant="ghost"
+                    disabled={busy !== '' || !book.voice_id}
+                    onClick={queueSelectedChunks}
+                    title={book.voice_id ? 'add the selected parts to the generation queue (selected done parts regenerate)' : 'assign a voice first'}
+                  >
+                    ⚡ queue selected parts
+                  </Button>
+                  <button className="text-xs text-zinc-400 hover:underline" onClick={() => setSelectedChunks(new Set())}>
+                    ✕ clear
+                  </button>
+                </div>
+              )}
               <div className="space-y-1.5 max-h-[480px] overflow-y-auto pr-1">
                 {chapterData.chunks.map((chunk) => (
-                  <ChunkRow key={chunk.id} chunk={chunk} onPlay={() => playUrl(api.audioUrl.chunk(chunk.id))} onChanged={refreshChapter} onError={setError} />
+                  <ChunkRow
+                    key={chunk.id}
+                    chunk={chunk}
+                    selected={selectedChunks.has(chunk.id)}
+                    onToggleSelect={() =>
+                      setSelectedChunks((s) => {
+                        const next = new Set(s);
+                        if (next.has(chunk.id)) next.delete(chunk.id);
+                        else next.add(chunk.id);
+                        return next;
+                      })
+                    }
+                    onPlay={() => playUrl(api.audioUrl.chunk(chunk.id))}
+                    onChanged={refreshChapter}
+                    onError={setError}
+                  />
                 ))}
               </div>
             </Panel>
@@ -499,7 +596,21 @@ function ChunkTimeline({ chunks, onSeek }: { chunks: Chunk[]; onSeek: (ms: numbe
 
 /* ---------- single chunk row ---------- */
 
-function ChunkRow({ chunk, onPlay, onChanged, onError }: { chunk: Chunk; onPlay: () => void; onChanged: () => void; onError: (msg: string) => void }) {
+function ChunkRow({
+  chunk,
+  onPlay,
+  onChanged,
+  onError,
+  selected,
+  onToggleSelect,
+}: {
+  chunk: Chunk;
+  onPlay: () => void;
+  onChanged: () => void;
+  onError: (msg: string) => void;
+  selected?: boolean;
+  onToggleSelect?: () => void;
+}) {
   const [regenerating, setRegenerating] = useState(false);
   const [showSeed, setShowSeed] = useState(false);
   const [seed, setSeed] = useState('');
@@ -534,6 +645,15 @@ function ChunkRow({ chunk, onPlay, onChanged, onError }: { chunk: Chunk; onPlay:
   return (
     <div className={`rounded-lg border px-3 py-2 text-sm ${chunk.status === 'failed' ? 'border-red-900 bg-red-950/40' : 'border-zinc-800 bg-zinc-900/70'}`}>
       <div className="flex items-center gap-2 mb-1">
+        {onToggleSelect && (
+          <input
+            type="checkbox"
+            className="shrink-0 accent-emerald-500"
+            checked={selected ?? false}
+            onChange={onToggleSelect}
+            title="select this part for queueing"
+          />
+        )}
         <span className="text-xs text-zinc-500 w-12">#{chunk.idx + 1}</span>
         <StatusBadge status={chunk.status} />
         <span className="text-xs text-zinc-500">{formatDuration(chunk.duration_ms)}</span>
