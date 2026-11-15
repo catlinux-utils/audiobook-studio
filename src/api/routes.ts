@@ -664,7 +664,11 @@ export function registerRoutes(app: FastifyInstance): void {
 
     const ext = path.extname(record.path).toLowerCase();
     const base = path.basename(record.path, ext);
-    const out = path.join(path.dirname(record.path), `${base} (${targetMB}MB)${ext}`);
+    // keep the original filename — compressed copies live in a subfolder so
+    // nothing collides with the full-quality export
+    const outDir = path.join(paths.exports, 'compressed');
+    fs.mkdirSync(outDir, { recursive: true });
+    const out = path.join(outDir, `${base}${ext}`);
     if (ext === '.m4b') {
       // keep chapter markers + embedded cover; re-encode audio only
       await runFfmpeg([
@@ -679,6 +683,11 @@ export function registerRoutes(app: FastifyInstance): void {
       await runFfmpeg(['-y', '-i', record.path, '-codec:a', 'libmp3lame', '-b:a', `${kbps}k`, out]);
     }
     const sizeBytes = fs.statSync(out).size;
+    // carry the QA report over so the compressed row keeps its report link
+    const sourceReport = record.path.replace(/\.(mp3|m4b)$/i, '') + '.qa.txt';
+    if (fs.existsSync(sourceReport)) {
+      fs.copyFileSync(sourceReport, out.replace(/\.(mp3|m4b)$/i, '') + '.qa.txt');
+    }
 
     // compressing the same export twice re-points at the existing row
     const existing = db.prepare('SELECT id FROM exports WHERE path=?').get(out) as unknown as { id: string } | undefined;
