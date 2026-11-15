@@ -107,7 +107,7 @@ export default function Exports() {
                 <span className="ml-auto flex items-center gap-2">
                   <a href={`/api/exports/${x.id}/download`} className="text-emerald-400 hover:underline">⬇ download</a>
                   {x.qaSummary && (
-                    <a href={`/api/exports/${x.id}/report`} className="text-sky-400 hover:underline text-xs">⬇ QA report</a>
+                    <a href={`/api/exports/${x.id}/report`} target="_blank" rel="noreferrer" className="text-sky-400 hover:underline text-xs">QA report</a>
                   )}
                   <button
                     className="text-red-400 hover:underline"

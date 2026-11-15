@@ -649,12 +649,8 @@ export function registerRoutes(app: FastifyInstance): void {
       | undefined;
     const report = record ? record.path.replace(/\.(mp3|m4b)$/i, '') + '.qa.txt' : '';
     if (!record || !fs.existsSync(report)) return reply.code(404).send({ error: 'no QA report for this export' });
-    const name = path.basename(report);
-    const asciiFallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '');
-    return reply
-      .type('text/plain; charset=utf-8')
-      .header('Content-Disposition', `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())}`)
-      .send(fs.createReadStream(report));
+    // inline, not attachment — the report is plain text, browsers should just show it
+    return reply.type('text/plain; charset=utf-8').send(fs.createReadStream(report));
   });
 
   app.get('/api/exports/:id/download', async (req, reply) => {

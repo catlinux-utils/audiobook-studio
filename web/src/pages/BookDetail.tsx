@@ -346,8 +346,8 @@ export default function BookDetail() {
                   ⬇ download
                 </a>
                 {x.qaSummary && (
-                  <a href={`/api/exports/${x.id}/report`} className="text-sky-400 hover:underline text-xs" title="word-check report (.qa.txt)">
-                    ⬇ QA report
+                  <a href={`/api/exports/${x.id}/report`} target="_blank" rel="noreferrer" className="text-sky-400 hover:underline text-xs" title="opens in a new tab">
+                    QA report
                   </a>
                 )}
               </div>
