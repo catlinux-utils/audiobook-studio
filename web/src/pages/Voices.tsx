@@ -273,29 +273,112 @@ export default function Voices() {
       <div className="space-y-2">
         {voices.length === 0 && <div className="rounded-xl border border-dashed border-zinc-700 p-10 text-center text-zinc-400">No voices yet. Prepare one above — the transcript makes cloning noticeably better.</div>}
         {voices.map((v) => (
-          <div key={v.id} className="rounded-xl bg-zinc-900 border border-zinc-800 p-4 flex items-center gap-4">
-            <div className="flex-1 min-w-0">
-              <div className="font-medium">{v.name}</div>
-              <div className="text-sm text-zinc-500 truncate">{v.reference_text || 'no transcript'}</div>
-            </div>
-            <Button onClick={() => preview(v.id)} disabled={previewingId === v.id}>
-              {previewingId === v.id ? 'generating…' : '▶ preview'}
-            </Button>
-            <Button variant="ghost" onClick={() => void new Audio(api.audioUrl.voice(v.id)).play()} title="hear the original reference">
-              🔊 ref
-            </Button>
-            <Button
-              variant="danger"
-              onClick={async () => {
-                await api.deleteVoice(v.id);
-                refresh();
-              }}
-            >
-              delete
-            </Button>
-          </div>
+          <VoiceRow key={v.id} v={v} previewingId={previewingId} previewText={previewText} onPreview={preview} onChanged={refresh} onError={setError} />
         ))}
       </div>
+    </div>
+  );
+}
+
+function VoiceRow({
+  v,
+  previewingId,
+  previewText,
+  onPreview,
+  onChanged,
+  onError,
+}: {
+  v: Voice;
+  previewingId: string | null;
+  previewText: string;
+  onPreview: (id: string) => void;
+  onChanged: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(v.name);
+  const [transcript, setTranscript] = useState(v.reference_text);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!editing) {
+      setName(v.name);
+      setTranscript(v.reference_text);
+    }
+  }, [v.name, v.reference_text, editing]);
+
+  const save = async () => {
+    if (!name.trim()) {
+      onError('voice name cannot be empty');
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.updateVoice(v.id, { name: name.trim(), referenceText: transcript });
+      setEditing(false);
+      onChanged();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4 flex items-start gap-4">
+      <div className="flex-1 min-w-0">
+        {editing ? (
+          <div className="space-y-2">
+            <input
+              className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-sm font-medium"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="voice name"
+            />
+            <textarea
+              className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm min-h-[56px]"
+              value={transcript}
+              onChange={(e) => setTranscript(e.target.value)}
+              placeholder="transcript (exact words of the reference clip)"
+            />
+            <div className="flex gap-2">
+              <Button variant="primary" disabled={saving} onClick={save}>
+                {saving ? 'saving…' : 'save'}
+              </Button>
+              <Button variant="ghost" onClick={() => setEditing(false)}>
+                cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="font-medium">{v.name}</div>
+            <div className="text-sm text-zinc-500 truncate">{v.reference_text || 'no transcript'}</div>
+          </>
+        )}
+      </div>
+      {!editing && (
+        <>
+          <Button onClick={() => onPreview(v.id)} disabled={previewingId === v.id}>
+            {previewingId === v.id ? 'generating…' : '▶ preview'}
+          </Button>
+          <Button variant="ghost" onClick={() => void new Audio(api.audioUrl.voice(v.id)).play()} title="hear the original reference">
+            🔊 ref
+          </Button>
+          <Button variant="ghost" onClick={() => setEditing(true)} title="rename / edit transcript">
+            ✏ edit
+          </Button>
+          <Button
+            variant="danger"
+            onClick={async () => {
+              await api.deleteVoice(v.id);
+              onChanged();
+            }}
+          >
+            delete
+          </Button>
+        </>
+      )}
     </div>
   );
 }

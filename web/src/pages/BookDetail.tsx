@@ -12,6 +12,11 @@ export default function BookDetail() {
   const [qa, setQa] = useState<QaSample | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const [editingHeader, setEditingHeader] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
+  const [editAuthor, setEditAuthor] = useState('');
+  const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
+  const [editChapterTitle, setEditChapterTitle] = useState('');
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const refreshBook = useCallback(() => {
@@ -87,10 +92,56 @@ export default function BookDetail() {
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-3 mb-1">
-            <h1 className="text-2xl font-semibold truncate">{book.title}</h1>
-            <StatusBadge status={book.status} />
+            {editingHeader ? (
+              <div className="flex-1 flex flex-wrap gap-2">
+                <input
+                  className="flex-1 min-w-[200px] rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-lg font-semibold"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  placeholder="title"
+                />
+                <input
+                  className="flex-1 min-w-[160px] rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-sm"
+                  value={editAuthor}
+                  onChange={(e) => setEditAuthor(e.target.value)}
+                  placeholder="author"
+                />
+                <Button
+                  variant="primary"
+                  onClick={() =>
+                    act('meta', () =>
+                      api.updateBook(id, { title: editTitle || book.title, author: editAuthor }).then(() => {
+                        setEditingHeader(false);
+                        refreshBook();
+                      }),
+                    )
+                  }
+                >
+                  save
+                </Button>
+                <Button variant="ghost" onClick={() => setEditingHeader(false)}>
+                  cancel
+                </Button>
+              </div>
+            ) : (
+              <>
+                <h1 className="text-2xl font-semibold truncate">{book.title}</h1>
+                <StatusBadge status={book.status} />
+                <button
+                  className="text-zinc-500 hover:text-zinc-200 text-sm"
+                  title="rename book / author"
+                  onClick={() => {
+                    setEditTitle(book.title);
+                    setEditAuthor(book.author);
+                    setEditingHeader(true);
+                  }}
+                >
+                  ✏
+                </button>
+              </>
+            )}
           </div>
-          <div className="text-zinc-400 mb-3">{book.author || '—'}</div>
+          {!editingHeader && <div className="text-zinc-400 mb-3">{book.author || '—'}</div>}
           <ProgressBar done={doneChunks} total={totalChunks} failed={book.chunks_failed ?? 0} />
           <div className="flex items-center gap-4 text-sm text-zinc-400 mt-1 mb-3">
             <span>
@@ -165,16 +216,56 @@ export default function BookDetail() {
           <Panel title="Chapters">
             <div className="max-h-[420px] overflow-y-auto space-y-1">
               {book.chapters.map((c) => (
-                <button
+                <div
                   key={c.id}
-                  onClick={() => setChapterId(c.id)}
-                  className={`w-full text-left rounded-lg px-3 py-2 transition-colors ${
+                  className={`w-full rounded-lg px-3 py-2 transition-colors ${
                     chapterId === c.id ? 'bg-zinc-700' : 'hover:bg-zinc-800'
                   }`}
                 >
-                  <div className="text-sm truncate">
-                    {c.idx + 1}. {c.title}
-                  </div>
+                  {editingChapterId === c.id ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        className="flex-1 rounded bg-zinc-800 border border-zinc-600 px-2 py-1 text-sm"
+                        value={editChapterTitle}
+                        onChange={(e) => setEditChapterTitle(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            act('chtitle', () => api.renameChapter(id, c.id, editChapterTitle || c.title).then(refreshBook)).then(() => setEditingChapterId(null));
+                          }
+                        }}
+                      />
+                      <button
+                        className="text-xs text-emerald-400 hover:underline"
+                        onClick={() =>
+                          act('chtitle', () => api.renameChapter(id, c.id, editChapterTitle || c.title).then(refreshBook)).then(() => setEditingChapterId(null))
+                        }
+                      >
+                        save
+                      </button>
+                      <button className="text-xs text-zinc-400 hover:underline" onClick={() => setEditingChapterId(null)}>
+                        cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setChapterId(c.id)} className="w-full text-left">
+                      <div className="text-sm truncate flex items-baseline justify-between gap-2">
+                        <span className="truncate">
+                          {c.idx + 1}. {c.title}
+                        </span>
+                        <button
+                          className="text-zinc-500 hover:text-zinc-200 text-xs shrink-0"
+                          title="rename chapter"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditChapterTitle(c.title);
+                            setEditingChapterId(c.id);
+                          }}
+                        >
+                          ✏
+                        </button>
+                      </div>
+                    </button>
+                  )}
                   <div className="flex items-center gap-2 mt-1">
                     <ProgressBar done={c.chunks_done} total={c.chunk_count} failed={c.chunks_failed} />
                   </div>
@@ -182,7 +273,7 @@ export default function BookDetail() {
                     {c.chunks_done}/{c.chunk_count} · {formatDuration(c.duration_ms)}
                     {c.chunks_failed > 0 && <span className="text-red-400"> · {c.chunks_failed} failed</span>}
                   </div>
-                </button>
+                </div>
               ))}
             </div>
           </Panel>

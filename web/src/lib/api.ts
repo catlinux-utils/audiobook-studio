@@ -141,6 +141,8 @@ export const api = {
   pause: (id: string) => req('POST', `/api/books/${id}/pause`),
   cancel: (id: string) => req('POST', `/api/books/${id}/cancel`),
   rechunk: (id: string) => req('POST', `/api/books/${id}/rechunk`),
+  renameChapter: (bookId: string, chapterId: string, title: string) =>
+    req<{ id: string; title: string }>('PATCH', `/api/books/${bookId}/chapters/${chapterId}`, { title }),
   qaRandom: (id: string) => req<QaSample>('POST', `/api/books/${id}/qa/random`),
   exportBook: (id: string) => req<{ export: { path: string; duration_ms: number; chapter_count: number } }>('POST', `/api/books/${id}/export`),
   listExports: (id: string) => req<Array<{ id: string; path: string; duration_ms: number; created_at: string }>>('GET', `/api/books/${id}/exports`),
@@ -149,6 +151,8 @@ export const api = {
     req<{ ok: boolean }>('POST', `/api/chunks/${id}/regenerate`, seed ? { seed } : {}),
 
   listVoices: () => req<Voice[]>('GET', '/api/voices'),
+  updateVoice: (id: string, patch: { name?: string; referenceText?: string }) =>
+    req<Voice>('PATCH', `/api/voices/${id}`, patch),
   deleteVoice: (id: string) => req<{ ok: boolean }>('DELETE', `/api/voices/${id}`),
 
   uploadBook: async (file: File): Promise<{ id: string }> => {

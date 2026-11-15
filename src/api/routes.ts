@@ -292,6 +292,20 @@ export function registerRoutes(app: FastifyInstance): void {
     return { ok: true };
   });
 
+  app.patch('/api/books/:id/chapters/:chapterId', async (req, reply) => {
+    const { id, chapterId } = req.params as { id: string; chapterId: string };
+    const body = (req.body ?? {}) as { title?: string };
+    if (body.title === undefined) return reply.code(400).send({ error: 'title is required' });
+    const title = String(body.title).trim().slice(0, 200);
+    if (!title) return reply.code(400).send({ error: 'title cannot be empty' });
+    const db = getDb();
+    const result = db
+      .prepare('UPDATE chapters SET title=? WHERE id=? AND book_id=?')
+      .run(title, chapterId, id);
+    if (result.changes === 0) return reply.code(404).send({ error: 'chapter not found' });
+    return { id: chapterId, title };
+  });
+
   app.post('/api/books/:id/generate', async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
@@ -444,6 +458,33 @@ export function registerRoutes(app: FastifyInstance): void {
     }
     bus.emit('event', { type: 'voices.update' });
     return { id, name };
+  });
+
+  app.patch('/api/voices/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { name?: string; referenceText?: string };
+    const db = getDb();
+    const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
+    if (!voice) return reply.code(404).send({ error: 'voice not found' });
+
+    const next: { name?: string; reference_text?: string } = {};
+    if (body.name !== undefined) {
+      const name = String(body.name).trim();
+      if (!name) return reply.code(400).send({ error: 'name cannot be empty' });
+      const dupe = db.prepare('SELECT id FROM voices WHERE name=? AND id<>?').get(name, id);
+      if (dupe) return reply.code(409).send({ error: 'another voice already has this name' });
+      next.name = name;
+    }
+    if (body.referenceText !== undefined) next.reference_text = String(body.referenceText).trim();
+
+    const keys = Object.keys(next);
+    if (keys.length > 0) {
+      const sets = keys.map((k) => `${k}=?`).join(', ');
+      const values = keys.map((k) => String((next as Record<string, string>)[k]));
+      db.prepare(`UPDATE voices SET ${sets} WHERE id=?`).run(...values, id);
+      bus.emit('event', { type: 'voices.update' });
+    }
+    return db.prepare('SELECT id, name, reference_text, created_at FROM voices WHERE id=?').get(id);
   });
 
   app.delete('/api/voices/:id', async (req, reply) => {
