@@ -301,6 +301,7 @@ export class TtsQueue {
       try {
         const candidate = await this.client.synthesize({
           input: chunk.text,
+          language: book.language || undefined,
           voiceRefBase64,
           referenceText,
           numInferenceSteps: book.num_inference_steps,

@@ -117,6 +117,17 @@ export interface QaSample {
   nextChunkId: string | null;
 }
 
+export interface ChunkQa {
+  transcript: string;
+  /** words/phrases in the text the audio never said, in reading order */
+  missing: string[];
+  /** words the audio said that are not in the text (ASR noise, garbles) */
+  extra: string[];
+  sourceWords: number;
+  /** (missing + extra) / source words; null for empty text */
+  wer: number | null;
+}
+
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method,
@@ -164,6 +175,7 @@ export const api = {
 
   regenerateChunk: (id: string, seed?: string) =>
     req<{ ok: boolean }>('POST', `/api/chunks/${id}/regenerate`, seed ? { seed } : {}),
+  chunkQa: (id: string) => req<ChunkQa>('POST', `/api/chunks/${id}/qa`),
 
   listVoices: () => req<Voice[]>('GET', '/api/voices'),
   updateVoice: (id: string, patch: { name?: string; referenceText?: string }) =>

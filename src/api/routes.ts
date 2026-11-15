@@ -469,6 +469,32 @@ export function registerRoutes(app: FastifyInstance): void {
     return { ok: true };
   });
 
+  /** Word-completeness check: transcribe the generated audio and diff against the chunk text. */
+  app.post('/api/chunks/:id/qa', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const db = getDb();
+    const chunk = db.prepare('SELECT * FROM chunks WHERE id=?').get(id) as unknown as ChunkRow | undefined;
+    if (!chunk) return reply.code(404).send({ error: 'chunk not found' });
+    if (!chunk.audio_path || !fs.existsSync(chunk.audio_path)) {
+      return reply.code(409).send({ error: 'chunk has no generated audio' });
+    }
+    const book = db.prepare('SELECT language FROM books WHERE id=?').get(chunk.book_id) as unknown as
+      | { language: string }
+      | undefined;
+
+    const tmp16 = path.join(paths.data, `qa-${randomUUID()}-16k.wav`);
+    try {
+      await ffmpegRun(['-y', '-i', chunk.audio_path, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmp16]);
+      const client = new AudioCppClient(ttsBaseUrl(), 'asr');
+      const transcript = await client.transcribe(tmp16, book?.language || undefined);
+      return { transcript, ...diffWords(chunk.text, transcript) };
+    } catch (err) {
+      return reply.code(502).send({ error: `qa failed: ${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      fs.rmSync(tmp16, { force: true });
+    }
+  });
+
   // ---------- voices ----------
   app.get('/api/voices', async () => {
     return getDb().prepare('SELECT id, name, reference_text, created_at FROM voices ORDER BY name').all();
@@ -767,6 +793,88 @@ function rechunkBook(bookId: string, maxChunkChars: number): void {
   db.prepare('DELETE FROM chunks WHERE book_id=?').run(bookId);
   db.prepare('DELETE FROM chapters WHERE book_id=?').run(bookId);
   insertChaptersAndChunks(bookId, chapters, maxChunkChars);
+}
+
+interface WordDiff {
+  /** consecutive missing words grouped into phrases */
+  missing: string[];
+  extra: string[];
+  sourceWords: number;
+  /** (missing + extra) / source words; null for empty chunks */
+  wer: number | null;
+}
+
+function tokenizeWords(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * Word-level completeness diff between the chunk text and what the ASR heard
+ * in the generated audio. CrisperWhisper verbatim markers ("[UH]",
+ * "[lipsmack]") are dropped, immediate stutter repeats collapse. LCS alignment
+ * so missing words come back in reading order, grouped into phrases.
+ */
+function diffWords(sourceText: string, transcript: string): WordDiff {
+  const src = tokenizeWords(sourceText);
+  const spoken = tokenizeWords(transcript.replace(/\[[^\]]*\]/g, ' ')).filter((w, i, arr) => w !== arr[i - 1]);
+  const m = src.length;
+  const n = spoken.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i]![j] = src[i] === spoken[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
+    }
+  }
+  const missingWords: string[] = [];
+  const extraWords: string[] = [];
+  // anchor = spoken-stream position where the deviation happened, so missing
+  // words from different places don't merge into one fake phrase
+  const missingAt: number[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (src[i] === spoken[j]) {
+      i++;
+      j++;
+    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
+      missingWords.push(src[i]!);
+      missingAt.push(j);
+      i++;
+    } else {
+      extraWords.push(spoken[j]!);
+      j++;
+    }
+  }
+  while (i < m) {
+    missingWords.push(src[i++]!);
+    missingAt.push(n);
+  }
+  while (j < n) extraWords.push(spoken[j++]!);
+  // group consecutive deviations (same anchor) into phrases for display
+  const group = (ws: string[], anchors: number[]): string[] => {
+    const out: string[] = [];
+    let cur = '';
+    for (let k = 0; k < ws.length; k++) {
+      if (cur && anchors[k] !== anchors[k - 1]) {
+        out.push(cur);
+        cur = '';
+      }
+      cur = cur ? `${cur} ${ws[k]}` : ws[k]!;
+    }
+    if (cur) out.push(cur);
+    return out;
+  };
+  return {
+    missing: group(missingWords, missingAt),
+    extra: extraWords,
+    sourceWords: m,
+    wer: m > 0 ? Number(((missingWords.length + extraWords.length) / m).toFixed(3)) : null,
+  };
 }
 
 function neighborIds(chunkId: string): { prev: string | null; next: string | null } {

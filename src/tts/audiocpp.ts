@@ -28,6 +28,9 @@ export class TtsRequestError extends Error {
 
 export interface SynthesizeRequest {
   input: string;
+  /** Synthesis language code (e.g. "pl"); omitted → OmniVoice auto-detects.
+   *  Auto-detect misfires on short/odd text and garbles or drops words. */
+  language?: string;
   /** voice_dir name on the server (optional; inline voice_ref takes priority). */
   voice?: string;
   /** inline cloning reference, raw base64 of a WAV file */
@@ -120,6 +123,7 @@ export class AudioCppClient {
       input: req.input,
       response_format: 'wav',
     };
+    if (req.language) body.language = req.language;
     if (req.voice) body.voice = req.voice;
     if (req.voiceRefBase64) body.voice_ref = { type: 'base64', data: req.voiceRefBase64 };
     if (req.referenceText) body.reference_text = req.referenceText;

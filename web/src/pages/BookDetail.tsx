@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { api, onStudioEvent, type Book, type Chapter, type Chunk, type JobStats, type QaSample, type Voice } from '../lib/api';
+import { api, onStudioEvent, type Book, type Chapter, type Chunk, type ChunkQa, type JobStats, type QaSample, type Voice } from '../lib/api';
 import { Button, ProgressBar, StatusBadge, formatDuration, formatSpan } from '../components/bits';
 
 export default function BookDetail() {
@@ -10,6 +10,8 @@ export default function BookDetail() {
   const [chapterData, setChapterData] = useState<{ chapter: Chapter; chunks: Chunk[] } | null>(null);
   const [voices, setVoices] = useState<Voice[]>([]);
   const [qa, setQa] = useState<QaSample | null>(null);
+  const [spotQa, setSpotQa] = useState<ChunkQa | null>(null);
+  const [qaBusy, setQaBusy] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [editingHeader, setEditingHeader] = useState(false);
@@ -68,6 +70,7 @@ export default function BookDetail() {
   const spotCheck = async () => {
     setBusy('qa');
     setError('');
+    setSpotQa(null);
     try {
       const sample = await api.qaRandom(id);
       setQa(sample);
@@ -75,6 +78,19 @@ export default function BookDetail() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy('');
+    }
+  };
+
+  const checkWords = async () => {
+    if (!qa) return;
+    setQaBusy(true);
+    setError('');
+    try {
+      setSpotQa(await api.chunkQa(qa.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setQaBusy(false);
     }
   };
 
@@ -209,9 +225,45 @@ export default function BookDetail() {
           <p className="text-sm text-zinc-300 mb-3 whitespace-pre-wrap">{qa.text}</p>
           <div className="flex gap-2">
             <Button onClick={() => playUrl(api.audioUrl.chunk(qa.id))}>▶ play sample</Button>
+            <Button variant="ghost" onClick={checkWords} disabled={qaBusy}>
+              {qaBusy ? 'checking…' : '🔤 check words'}
+            </Button>
             {qa.prevChunkId && <Button variant="ghost" onClick={() => playUrl(api.audioUrl.chunk(qa.prevChunkId!))}>◀ prev chunk</Button>}
             {qa.nextChunkId && <Button variant="ghost" onClick={() => playUrl(api.audioUrl.chunk(qa.nextChunkId!))}>next chunk ▶</Button>}
           </div>
+          {spotQa && (
+            <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs space-y-1">
+              {spotQa.missing.length === 0 && spotQa.extra.length === 0 ? (
+                <div className="text-emerald-400">✓ all {spotQa.sourceWords} words present in the audio</div>
+              ) : (
+                <div className="space-y-1">
+                  {spotQa.missing.length > 0 && (
+                    <div>
+                      <span className="text-red-400 font-medium">missing:</span>{' '}
+                      {spotQa.missing.map((m, i) => (
+                        <span key={i} className="inline-block rounded bg-red-950 border border-red-900 text-red-300 px-1.5 py-0.5 mr-1 mb-0.5">
+                          {m}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {spotQa.extra.length > 0 && (
+                    <div>
+                      <span className="text-amber-400 font-medium">not in text:</span>{' '}
+                      {spotQa.extra.map((m, i) => (
+                        <span key={i} className="inline-block rounded bg-amber-950/60 border border-amber-900 text-amber-300 px-1.5 py-0.5 mr-1 mb-0.5">
+                          {m}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="text-zinc-500">
+                    ASR heard: <span className="text-zinc-400">{spotQa.transcript}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -432,17 +484,31 @@ function ChunkRow({ chunk, onPlay, onChanged, onError }: { chunk: Chunk; onPlay:
   const [regenerating, setRegenerating] = useState(false);
   const [showSeed, setShowSeed] = useState(false);
   const [seed, setSeed] = useState('');
+  const [qa, setQa] = useState<ChunkQa | null>(null);
+  const [qaBusy, setQaBusy] = useState(false);
 
   const regenerate = async (withSeed?: string) => {
     setRegenerating(true);
     try {
       await api.regenerateChunk(chunk.id, withSeed || undefined);
+      setQa(null); // old verdict no longer applies to new audio
       onChanged();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
       setRegenerating(false);
       setShowSeed(false);
+    }
+  };
+
+  const checkWords = async () => {
+    setQaBusy(true);
+    try {
+      setQa(await api.chunkQa(chunk.id));
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setQaBusy(false);
     }
   };
 
@@ -460,6 +526,11 @@ function ChunkRow({ chunk, onPlay, onChanged, onError }: { chunk: Chunk; onPlay:
             ▶ play
           </button>
         )}
+        {chunk.status === 'done' && (
+          <button className="text-xs text-sky-400 hover:underline" onClick={checkWords} disabled={qaBusy}>
+            {qaBusy ? 'checking…' : '🔤 check words'}
+          </button>
+        )}
         {chunk.status !== 'generating' && (
           <button className="text-xs text-zinc-400 hover:underline" onClick={() => setShowSeed((s) => !s)}>
             ♻ regenerate
@@ -468,6 +539,39 @@ function ChunkRow({ chunk, onPlay, onChanged, onError }: { chunk: Chunk; onPlay:
       </div>
       <div className="text-zinc-300 whitespace-pre-wrap leading-snug">{chunk.text}</div>
       {chunk.error && <div className="text-xs text-red-400 mt-1">{chunk.error}</div>}
+      {qa && (
+        <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs space-y-1">
+          {qa.missing.length === 0 && qa.extra.length === 0 ? (
+            <div className="text-emerald-400">✓ all {qa.sourceWords} words present in the audio</div>
+          ) : (
+            <div className="space-y-1">
+              {qa.missing.length > 0 && (
+                <div>
+                  <span className="text-red-400 font-medium">missing:</span>{' '}
+                  {qa.missing.map((m, i) => (
+                    <span key={i} className="inline-block rounded bg-red-950 border border-red-900 text-red-300 px-1.5 py-0.5 mr-1 mb-0.5">
+                      {m}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {qa.extra.length > 0 && (
+                <div>
+                  <span className="text-amber-400 font-medium">not in text:</span>{' '}
+                  {qa.extra.map((m, i) => (
+                    <span key={i} className="inline-block rounded bg-amber-950/60 border border-amber-900 text-amber-300 px-1.5 py-0.5 mr-1 mb-0.5">
+                      {m}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="text-zinc-500">
+                ASR heard: <span className="text-zinc-400">{qa.transcript}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {showSeed && (
         <div className="flex items-center gap-2 mt-2">
           <input

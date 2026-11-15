@@ -72,6 +72,14 @@ export function splitSentences(text: string): Array<{ text: string; start: numbe
   };
 
   for (let i = 0; i < text.length; i++) {
+    // a sentence never crosses a paragraph boundary — verse/heading lines
+    // without terminal punctuation must not swallow the next paragraph
+    if (text[i] === '\n' && text[i + 1] === '\n') {
+      pushSentence(i);
+      start = i;
+      i++;
+      continue;
+    }
     if (!terminal.test(text[i]!)) continue;
 
     // collect closing quotes/brackets right after the punctuation
@@ -138,18 +146,70 @@ function splitSentenceInner(sentence: string, maxChars: number): string[] {
 }
 
 /**
+ * Heuristic: is this paragraph a heading/title rather than running text?
+ * Headings merged into the following paragraph confuse diffusion TTS (it tends
+ * to skip or merge repeated short lines), so the packer breaks there.
+ * Conservative by design — false negatives just behave like before.
+ */
+export function isHeadingParagraph(paragraph: string): boolean {
+  const t = paragraph.trim();
+  if (!t || t.length > 40) return false;
+  // a line that closes with punctuation is prose/verse continuation, not a title
+  if (/[.!?…,:;]["'”’»)\]]*$/.test(t)) return false;
+  // verse lines without final punctuation usually have several commas;
+  // real titles have at most one ("Fraszki, Księgi pierwsze")
+  const commas = (t.match(/,/g) ?? []).length;
+  return commas <= 1;
+}
+
+/**
  * Pack sentences into chunks of at most `maxChars` characters.
- * Paragraph structure (\n\n) inside chunks is preserved verbatim.
+ * Paragraph structure (\n\n) inside chunks is preserved verbatim, and the
+ * packer never merges across a heading↔content paragraph boundary — headings
+ * (and consecutive heading runs) become their own chunk.
  */
 export function chunkText(text: string, maxChars = 280): TextChunk[] {
-  const clean = normalizeText(text);
+  let clean = normalizeText(text);
   if (!clean.trim()) return [];
+  // EPUB headings arrive marked with '# ' (see parseEpub) — exact structure.
+  // For unmarked text (TXT ingest) fall back to a heuristic, but only in the
+  // title zone: beyond the first paragraphs, short unpunctuated lines are
+  // usually verse, and treating them as headings fragments poetry.
+  const rawParas = clean.split('\n\n');
+  const marked = rawParas.map((p) => p.startsWith('# '));
+  const paras = rawParas.map((p, i) => (marked[i] ? p.slice(2) : p));
+  clean = paras.join('\n\n');
   const budget = Math.max(60, maxChars);
   const sentences = splitSentences(clean);
   const chunks: TextChunk[] = [];
 
+  // paragraph ranges + heading flags, for boundary-aware packing
+  const paragraphs: Array<{ start: number; end: number; heading: boolean }> = [];
+  {
+    let cursor = 0;
+    paras.forEach((p, i) => {
+      const start = cursor;
+      cursor += p.length + 2;
+      if (p.trim()) {
+        paragraphs.push({
+          start,
+          end: start + p.length,
+          heading: marked[i]! || (i <= 2 && isHeadingParagraph(p)),
+        });
+      }
+    });
+  }
+  const paragraphAt = (offset: number): { heading: boolean } | null => {
+    for (const p of paragraphs) if (offset >= p.start && offset < p.end) return { heading: p.heading };
+    return null;
+  };
+
   let current: Array<{ text: string; start: number; end: number }> = [];
   let currentLen = 0;
+  let lastHeading: boolean | null = null; // heading-ness of the paragraph current ends in
+  // every chunk is purely heading-run or purely content (transitions flush),
+  // tracked for the tiny-tail merge below
+  const chunkHeading: boolean[] = [];
 
   const flush = () => {
     if (current.length === 0) return;
@@ -161,11 +221,18 @@ export function chunkText(text: string, maxChars = 280): TextChunk[] {
       charEnd: last.end,
       softCut: false,
     });
+    chunkHeading.push(lastHeading ?? false);
     current = [];
     currentLen = 0;
+    lastHeading = null;
   };
 
   for (const sentence of sentences) {
+    const para = paragraphAt(sentence.start);
+    const heading = para?.heading ?? false;
+    // heading-ness changed across this paragraph boundary → start a new chunk
+    if (current.length > 0 && lastHeading !== null && heading !== lastHeading) flush();
+
     if (sentence.text.length > budget) {
       flush();
       const parts = splitSentenceInner(sentence.text, budget);
@@ -176,15 +243,40 @@ export function chunkText(text: string, maxChars = 280): TextChunk[] {
         const end = start + part.length;
         cursor = rel >= 0 ? rel + part.length : cursor + part.length;
         chunks.push({ text: part, charStart: start, charEnd: end, softCut: true });
+        chunkHeading.push(heading);
       }
       continue;
     }
-    if (currentLen + sentence.text.length > budget && current.length > 0) {
+    if (currentLen + (current.length > 0 ? 2 : 0) + sentence.text.length > budget && current.length > 0) {
       flush();
     }
+    // account for the '\n\n' separator the packed text will actually contain
+    currentLen += sentence.text.length + (current.length > 0 ? 2 : 0);
     current.push(sentence);
-    currentLen += sentence.text.length;
+    lastHeading = heading;
   }
   flush();
+
+  // absorb a tiny trailing content chunk into the previous content chunk —
+  // sub-60-char chunks waste a synthesis request and risk degenerate output
+  for (let i = 1; i < chunks.length; i++) {
+    const cur = chunks[i]!;
+    const prev = chunks[i - 1]!;
+    if (
+      !chunkHeading[i] &&
+      !chunkHeading[i - 1] &&
+      !cur.softCut &&
+      !prev.softCut &&
+      cur.text.length < 60 &&
+      prev.text.length + cur.text.length + 2 <= budget
+    ) {
+      prev.text = `${prev.text}\n\n${cur.text}`;
+      prev.charEnd = cur.charEnd;
+      chunks.splice(i, 1);
+      chunkHeading.splice(i, 1);
+      i--;
+    }
+  }
+
   return chunks.map((c) => ({ ...c, text: c.text.trim() }));
 }

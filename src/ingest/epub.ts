@@ -163,6 +163,13 @@ export function parseEpub(buf: Uint8Array): EpubBook {
     const $ = cheerio.load(readText(files, key));
     $('script, style, nav, header, footer').remove();
     const heading = $('h1, h2, h3').first().text().trim();
+    // .text() alone loses block boundaries (cheerio only emits the whitespace
+    // present in the source, and many epubs are minified) — mark them explicitly.
+    // Real headings get a '# ' marker so the chunker can isolate them exactly
+    // instead of guessing (the marker is stripped again before synthesis).
+    $('h1, h2, h3, h4, h5, h6').before('# ');
+    $('p, h1, h2, h3, h4, h5, h6, li, blockquote, div, section, article, tr, dd, dt, figcaption').after('\n\n');
+    $('br').after('\n');
     const text = $('body').text();
     const clean = text
       .replace(/\r\n?/g, '\n')
