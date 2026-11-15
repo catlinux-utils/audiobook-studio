@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { api, onStudioEvent, type Book, type Chapter, type Chunk, type ChunkQa, type JobStats, type QaSample, type Voice } from '../lib/api';
+import { api, onStudioEvent, type Book, type Chapter, type Chunk, type ChunkQa, type JobStats, type QaSample, type QaSummary, type Voice } from '../lib/api';
 import { Button, ProgressBar, StatusBadge, formatDuration, formatSpan } from '../components/bits';
 
 export default function BookDetail() {
@@ -19,7 +19,7 @@ export default function BookDetail() {
   const [editAuthor, setEditAuthor] = useState('');
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [editChapterTitle, setEditChapterTitle] = useState('');
-  const [exports, setExports] = useState<Array<{ id: string; path: string; format: string; duration_ms: number; chapter_count: number; created_at: string }>>([]);
+  const [exports, setExports] = useState<Array<{ id: string; path: string; format: string; duration_ms: number; chapter_count: number; created_at: string; qaSummary: QaSummary | null }>>([]);
   const [selectedChapters, setSelectedChapters] = useState<Set<string>>(new Set());
   const [selectedChunks, setSelectedChunks] = useState<Set<string>>(new Set());
   const [exportedNote, setExportedNote] = useState<string | null>(null);
@@ -319,12 +319,26 @@ export default function BookDetail() {
                   <span className="text-zinc-400 uppercase">{x.format}</span> · {x.chapter_count} chapter(s) · {formatDuration(x.duration_ms)} ·{' '}
                   {new Date(x.created_at).toLocaleString()}
                 </span>
-                <a
-                  href={`/api/exports/${x.id}/download`}
-                  className="ml-auto text-emerald-400 hover:underline"
-                >
+                {x.qaSummary && (
+                  <span
+                    className={`text-xs rounded px-1.5 py-0.5 border ${
+                      x.qaSummary.flagged > 0
+                        ? 'bg-amber-950/60 border-amber-900 text-amber-300'
+                        : 'bg-emerald-950/60 border-emerald-900 text-emerald-300'
+                    }`}
+                    title={`${x.qaSummary.missingWords} missing word(s) · WER ${(100 * (x.qaSummary.wer ?? 0)).toFixed(1)}%`}
+                  >
+                    QA {x.qaSummary.checked - x.qaSummary.flagged}/{x.qaSummary.checked} clean
+                  </span>
+                )}
+                <a href={`/api/exports/${x.id}/download`} className="ml-auto text-emerald-400 hover:underline">
                   ⬇ download
                 </a>
+                {x.qaSummary && (
+                  <a href={`/api/exports/${x.id}/report`} className="text-sky-400 hover:underline text-xs" title="word-check report (.qa.txt)">
+                    ⬇ QA report
+                  </a>
+                )}
               </div>
             ))}
           </div>
@@ -491,12 +505,14 @@ export default function BookDetail() {
                       act('export-ch', () =>
                         api.exportChapter(id, chapterData.chapter.id).then((r) => {
                           refreshBook();
+                          const clean = r.qa.checked - r.qa.flagged;
                           setExportedNote(
-                            r.parts < r.total
-                              ? `exported ${r.parts}/${r.total} generated parts of this chapter`
-                              : 'chapter exported',
+                            (r.parts < r.total ? `exported ${r.parts}/${r.total} generated parts · ` : '') +
+                              (r.qa.flagged > 0
+                                ? `word check: ${clean}/${r.qa.checked} parts clean, ${r.qa.flagged} with missing words (WER ${(100 * (r.qa.wer ?? 0)).toFixed(1)}%)`
+                                : `word check: all ${r.qa.checked} parts clean`),
                           );
-                          setTimeout(() => setExportedNote(null), 6000);
+                          setTimeout(() => setExportedNote(null), 10000);
                         }),
                       )
                     }

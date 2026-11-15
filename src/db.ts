@@ -44,6 +44,8 @@ export interface ChunkRow {
   duration_ms: number | null;
   error: string | null;
   attempts: number;
+  /** JSON-encoded WordQa verdict (with durationMs) of the last word-check. */
+  qa: string | null;
 }
 
 export interface VoiceRow {
@@ -151,6 +153,11 @@ const MIGRATIONS: string[] = [
     chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
     PRIMARY KEY (job_id, chunk_id)
   );
+  `,
+  // 005 — persisted word-check verdicts + export QA summaries
+  `
+  ALTER TABLE chunks ADD COLUMN qa TEXT;
+  ALTER TABLE exports ADD COLUMN qa_summary TEXT;
   `,
 ];
 

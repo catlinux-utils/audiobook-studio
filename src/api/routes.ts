@@ -430,13 +430,13 @@ export function registerRoutes(app: FastifyInstance): void {
       .get(chapterId, id) as unknown as ChapterRow | undefined;
     if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
     const chunks = db
-      .prepare("SELECT audio_path FROM chunks WHERE chapter_id=? AND status='done' AND audio_path IS NOT NULL ORDER BY idx")
-      .all(chapterId) as unknown as Array<{ audio_path: string }>;
+      .prepare("SELECT * FROM chunks WHERE chapter_id=? AND status='done' AND audio_path IS NOT NULL ORDER BY idx")
+      .all(chapterId) as unknown as ChunkRow[];
     if (chunks.length === 0) return reply.code(409).send({ error: 'no generated audio in this chapter' });
     const total = db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=?').get(chapterId) as unknown as { n: number };
 
     try {
-      const assembled = await assembleChapter(chapterId, chunks.map((c) => c.audio_path));
+      const assembled = await assembleChapter(chapterId, chunks.map((c) => c.audio_path!));
       fs.mkdirSync(paths.exports, { recursive: true });
       const safe = `${book.title} - ${chapter.title}`
         .replace(/[\\/:*?"<>|]+/g, '_')
@@ -445,6 +445,15 @@ export function registerRoutes(app: FastifyInstance): void {
         .slice(0, 120) || chapterId;
       const out = path.join(paths.exports, `${safe}.mp3`);
       await exportChapterMp3(assembled.path, out);
+
+      // word-check every exported part (cached verdicts reused) + sidecar report
+      const language = book.language || undefined;
+      const qaRows: Array<{ idx: number; qa: StoredQa }> = [];
+      for (let i = 0; i < chunks.length; i++) {
+        qaRows.push({ idx: i + 1, qa: await qaChunkWithCache(chunks[i]!, language) });
+      }
+      const qaSummary = writeQaReport(out, `${book.title} — ${chapter.title} (word check)`, qaRows);
+
       const record = {
         id: randomUUID(),
         book_id: id,
@@ -454,11 +463,12 @@ export function registerRoutes(app: FastifyInstance): void {
         duration_ms: assembled.durationMs,
         created_at: new Date().toISOString(),
       };
-      db.prepare('INSERT INTO exports (id, book_id, format, path, chapter_count, duration_ms, created_at) VALUES (?,?,?,?,?,?,?)').run(
+      db.prepare('INSERT INTO exports (id, book_id, format, path, chapter_count, duration_ms, created_at, qa_summary) VALUES (?,?,?,?,?,?,?,?)').run(
         record.id, record.book_id, record.format, record.path, record.chapter_count, record.duration_ms, record.created_at,
+        JSON.stringify(qaSummary),
       );
       bus.emit('event', { type: 'book.update', bookId: id, status: book.status });
-      return { export: record, parts: chunks.length, total: total.n };
+      return { export: record, parts: chunks.length, total: total.n, qa: qaSummary };
     } catch (err) {
       return reply.code(500).send({ error: `chapter export failed: ${err instanceof Error ? err.message : String(err)}` });
     }
@@ -527,12 +537,24 @@ export function registerRoutes(app: FastifyInstance): void {
     if (assembled.length === 0) return reply.code(409).send({ error: 'no complete chapters to export' });
     try {
       const m4b = await exportM4b(id, { title: book.title, author: book.author }, assembled, book.cover_path);
-      const record = { id: randomUUID(), book_id: id, format: 'm4b', path: m4b.path, chapter_count: assembled.length, duration_ms: m4b.durationMs, created_at: new Date().toISOString() };
-      db.prepare('INSERT INTO exports (id, book_id, format, path, chapter_count, duration_ms, created_at) VALUES (?,?,?,?,?,?,?)').run(
-        record.id, record.book_id, record.format, record.path, record.chapter_count, record.duration_ms, record.created_at,
+      // word-check every exported part (cached verdicts reused) + sidecar report
+      const language = book.language || undefined;
+      const qaRows: Array<{ idx: number; chapterTitle?: string; qa: StoredQa }> = [];
+      for (const a of assembled) {
+        const chunks = db
+          .prepare("SELECT * FROM chunks WHERE chapter_id=? AND status='done' AND audio_path IS NOT NULL ORDER BY idx")
+          .all(a.chapterId) as unknown as ChunkRow[];
+        for (const c of chunks) {
+          qaRows.push({ idx: qaRows.length + 1, chapterTitle: a.title, qa: await qaChunkWithCache(c, language) });
+        }
+      }
+      const qaSummary = writeQaReport(m4b.path, `${book.title} — word check (${assembled.length} chapters)`, qaRows);
+      const record = { id: randomUUID(), book_id: id, format: 'm4b', path: m4b.path, chapter_count: assembled.length, duration_ms: m4b.durationMs, created_at: new Date().toISOString(), qa_summary: JSON.stringify(qaSummary) };
+      db.prepare('INSERT INTO exports (id, book_id, format, path, chapter_count, duration_ms, created_at, qa_summary) VALUES (?,?,?,?,?,?,?,?)').run(
+        record.id, record.book_id, record.format, record.path, record.chapter_count, record.duration_ms, record.created_at, record.qa_summary,
       );
       bus.emit('event', { type: 'book.update', bookId: id, status: book.status });
-      return { export: record };
+      return { export: record, qa: qaSummary };
     } catch (err) {
       return reply.code(500).send({ error: `export failed: ${err instanceof Error ? err.message : String(err)}` });
     }
@@ -540,7 +562,26 @@ export function registerRoutes(app: FastifyInstance): void {
 
   app.get('/api/books/:id/exports', async (req) => {
     const { id } = req.params as { id: string };
-    return getDb().prepare('SELECT id, format, path, chapter_count, duration_ms, created_at FROM exports WHERE book_id=? ORDER BY created_at DESC').all(id);
+    const rows = getDb()
+      .prepare('SELECT id, format, path, chapter_count, duration_ms, created_at, qa_summary FROM exports WHERE book_id=? ORDER BY created_at DESC')
+      .all(id) as unknown as Array<{ id: string; format: string; path: string; chapter_count: number; duration_ms: number; created_at: string; qa_summary: string | null }>;
+    return rows.map((x) => ({ ...x, qaSummary: x.qa_summary ? JSON.parse(x.qa_summary) : null }));
+  });
+
+  /** The word-check report sidecar of an export. */
+  app.get('/api/exports/:id/report', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const record = getDb().prepare('SELECT path FROM exports WHERE id=?').get(id) as unknown as
+      | { path: string }
+      | undefined;
+    const report = record ? record.path.replace(/\.(mp3|m4b)$/i, '') + '.qa.txt' : '';
+    if (!record || !fs.existsSync(report)) return reply.code(404).send({ error: 'no QA report for this export' });
+    const name = path.basename(report);
+    const asciiFallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '');
+    return reply
+      .type('text/plain; charset=utf-8')
+      .header('Content-Disposition', `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())}`)
+      .send(fs.createReadStream(report));
   });
 
   app.get('/api/exports/:id/download', async (req, reply) => {
@@ -609,7 +650,8 @@ export function registerRoutes(app: FastifyInstance): void {
       | undefined;
 
     try {
-      return await qaTake(chunk.audio_path, chunk.text, book?.language || undefined);
+      // verdict is cached on the chunk (with its duration) so exports reuse it
+      return await qaChunkWithCache(chunk, book?.language || undefined);
     } catch (err) {
       return reply.code(502).send({ error: `qa failed: ${err instanceof Error ? err.message : String(err)}` });
     }
@@ -957,6 +999,79 @@ function rechunkBook(bookId: string, maxChunkChars: number): void {
   db.prepare('DELETE FROM chunks WHERE book_id=?').run(bookId);
   db.prepare('DELETE FROM chapters WHERE book_id=?').run(bookId);
   insertChaptersAndChunks(bookId, chapters, maxChunkChars);
+}
+
+interface WordQaSummary {
+  /** parts checked */
+  checked: number;
+  /** parts with missing words */
+  flagged: number;
+  missingWords: number;
+  extraWords: number;
+  /** (missing + extra) / source words across all parts */
+  wer: number | null;
+  /** report file name, next to the export */
+  reportFile: string | null;
+}
+
+type StoredQa = WordQa & { durationMs: number };
+
+/**
+ * Word-check a generated chunk, reusing the stored verdict when it still
+ * matches the current audio (duration changes on regeneration → re-check).
+ */
+async function qaChunkWithCache(chunk: ChunkRow, language?: string): Promise<StoredQa> {
+  const db = getDb();
+  if (chunk.qa) {
+    try {
+      const stored = JSON.parse(chunk.qa) as StoredQa;
+      if (stored.durationMs === chunk.duration_ms) return stored;
+    } catch {
+      // stale or corrupt verdict → re-check below
+    }
+  }
+  const qa = await qaTake(chunk.audio_path!, chunk.text, language);
+  const stored: StoredQa = { ...qa, durationMs: chunk.duration_ms ?? 0 };
+  db.prepare('UPDATE chunks SET qa=? WHERE id=?').run(JSON.stringify(stored), chunk.id);
+  return stored;
+}
+
+/**
+ * Write a human-readable QA report next to an export and return the summary.
+ * `rows` are the export's checked chunks in playback order.
+ */
+function writeQaReport(
+  exportPath: string,
+  title: string,
+  rows: Array<{ idx: number; chapterTitle?: string; qa: StoredQa }>,
+): WordQaSummary {
+  let missingWords = 0;
+  let extraWords = 0;
+  let sourceWords = 0;
+  let flagged = 0;
+  const lines: string[] = [title, '='.repeat(title.length), ''];
+  for (const r of rows) {
+    sourceWords += r.qa.sourceWords;
+    missingWords += r.qa.missingCount;
+    extraWords += r.qa.extra.length;
+    const clean = r.qa.missing.length === 0;
+    if (!clean) flagged++;
+    lines.push(
+      `#${r.idx}${r.chapterTitle ? ` — ${r.chapterTitle}` : ''} — ${clean ? 'clean' : 'MISSING WORDS'} (${(r.qa.durationMs / 1000).toFixed(1)}s)`,
+    );
+    if (r.qa.missing.length > 0) lines.push(`   missing: ${r.qa.missing.map((m) => `"${m}"`).join(', ')}`);
+    if (r.qa.variants.length > 0) lines.push(`   variants (ok): ${r.qa.variants.join(', ')}`);
+    if (r.qa.extra.length > 0) lines.push(`   not in text: ${r.qa.extra.join(', ')}`);
+    lines.push(`   heard: ${r.qa.transcript}`, '');
+  }
+  const wer = sourceWords > 0 ? Number(((missingWords + extraWords) / sourceWords).toFixed(3)) : null;
+  lines.unshift(
+    '',
+    `checked: ${rows.length} parts · flagged: ${flagged} · missing words: ${missingWords} · WER: ${wer ?? '—'}`,
+  );
+  const reportFile = `${exportPath.replace(/\.(mp3|m4b)$/i, '')}.qa.txt`;
+  fs.writeFileSync(reportFile, lines.join('\n'), 'utf8');
+  return { checked: rows.length, flagged, missingWords, extraWords, wer, reportFile: path.basename(reportFile) };
 }
 
 function neighborIds(chunkId: string): { prev: string | null; next: string | null } {
