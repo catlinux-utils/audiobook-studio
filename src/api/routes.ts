@@ -727,6 +727,37 @@ export function registerRoutes(app: FastifyInstance): void {
     };
   });
 
+  /** Remove an export: the row, its file on disk, its QA report and any compressed copy. */
+  app.delete('/api/exports/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const db = getDb();
+    const record = db.prepare('SELECT book_id, path FROM exports WHERE id=?').get(id) as unknown as
+      | { book_id: string; path: string }
+      | undefined;
+    if (!record) return reply.code(404).send({ error: 'export not found' });
+
+    const insideExports = (p: string) => path.resolve(p).startsWith(path.resolve(paths.exports));
+    const targets: Array<{ id: string; path: string }> = [{ id, path: record.path }];
+    // the compressed copy of the same audio goes with it
+    const base = path.basename(record.path);
+    const all = db.prepare('SELECT id, path FROM exports').all() as unknown as Array<{ id: string; path: string }>;
+    for (const row of all) {
+      if (row.id !== id && path.basename(row.path) === base && targets.every((t) => t.id !== row.id)) {
+        targets.push(row);
+      }
+    }
+
+    for (const t of targets) {
+      if (!insideExports(t.path)) continue; // never touch files outside exports/
+      fs.rmSync(t.path, { force: true });
+      fs.rmSync(t.path.replace(/\.(mp3|m4b)$/i, '') + '.qa.txt', { force: true });
+      db.prepare('DELETE FROM exports WHERE id=?').run(t.id);
+    }
+    const status = (db.prepare('SELECT status FROM books WHERE id=?').get(record.book_id) as unknown as { status: string } | undefined)?.status;
+    if (status) bus.emit('event', { type: 'book.update', bookId: record.book_id, status });
+    return { ok: true, removed: targets.length };
+  });
+
   // ---------- QA spot-check ----------
   app.post('/api/books/:id/qa/random', async (req, reply) => {
     const { id } = req.params as { id: string };

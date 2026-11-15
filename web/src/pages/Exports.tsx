@@ -41,6 +41,21 @@ export default function Exports() {
     }
   };
 
+  const removeExport = async (row: ExportRow) => {
+    const name = row.path.split(/[\\/]/).pop();
+    if (!window.confirm(`Delete "${name}" from disk? This also removes its QA report and compressed copy, if any.`)) return;
+    setBusyId(row.id);
+    setError('');
+    try {
+      await api.deleteExport(row.id);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const estimateKbps = (row: ExportRow, targetMB: number) =>
     row.durationMs > 0 ? Math.floor(((targetMB * 1024 * 1024 * 0.96 * 8) / 1000) / (row.durationMs / 1000)) : 0;
 
@@ -94,6 +109,14 @@ export default function Exports() {
                   {x.qaSummary && (
                     <a href={`/api/exports/${x.id}/report`} className="text-sky-400 hover:underline text-xs">⬇ QA report</a>
                   )}
+                  <button
+                    className="text-red-400 hover:underline"
+                    disabled={busyId === x.id}
+                    onClick={() => removeExport(x)}
+                    title="delete the file from disk and remove it from the list"
+                  >
+                    🗑
+                  </button>
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-zinc-500">

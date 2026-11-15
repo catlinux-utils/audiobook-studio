@@ -249,6 +249,7 @@ export const api = {
       `/api/exports/${id}/compress`,
       { targetMB },
     ),
+  deleteExport: (id: string) => req<{ ok: boolean; removed: number }>('DELETE', `/api/exports/${id}`),
 
   regenerateChunk: (id: string, seed?: string) =>
     req<{ ok: boolean }>('POST', `/api/chunks/${id}/regenerate`, seed ? { seed } : {}),
