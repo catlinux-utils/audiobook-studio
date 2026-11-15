@@ -342,8 +342,8 @@ export function registerRoutes(app: FastifyInstance): void {
     if ('error' in result) return reply.code(409).send(result);
     return result;
   });
-  app.post('/api/books/:id/pause', async (req) => queue.pauseBook((req.params as { id: string }).id));
-  app.post('/api/books/:id/cancel', async (req) => queue.cancelBook((req.params as { id: string }).id));
+  app.post('/api/books/:id/pause', async (req) => queue.pauseBook((req.params as { id: string }).id) ?? { ok: true });
+  app.post('/api/books/:id/cancel', async (req) => queue.cancelBook((req.params as { id: string }).id) ?? { ok: true });
 
   app.post('/api/books/:id/rechunk', async (req, reply) => {
     const { id } = req.params as { id: string };

@@ -22,6 +22,7 @@ import { bus, type StudioEvent } from '../bus.js';
 export class TtsQueue {
   private regenQueue = new Map<string, string | undefined>(); // chunkId -> seed override
   private activeRegens = new Set<string>(); // chunkIds currently synthesizing via priority path
+  private aborters = new Map<string, AbortController>(); // chunkId -> in-flight request controller
   private client: AudioCppClient;
   private pausedJobs = new Set<string>();
   private active = 0;
@@ -123,6 +124,12 @@ export class TtsQueue {
          WHERE id=?`,
       ).run(new Date().toISOString(), job.id);
     }
+    // abort in-flight synthesis requests for this book's generating chunks,
+    // then reset them so the aborted runner sees 'pending' and stays quiet
+    const generating = db
+      .prepare("SELECT id FROM chunks WHERE book_id=? AND status='generating'")
+      .all(bookId) as unknown as Array<{ id: string }>;
+    for (const g of generating) this.aborters.get(g.id)?.abort();
     db.prepare("UPDATE chunks SET status='pending', error=NULL WHERE book_id=? AND status='generating'").run(bookId);
     const remaining = db
       .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND status='pending'")
@@ -243,6 +250,12 @@ export class TtsQueue {
       const { durationMs } = await this.synthesizeChunk(chunk, seedOverride);
       this.noteChunkDone(jobId, chunk, durationMs);
     } catch (err) {
+      // if the chunk was reset by cancelBook while we were in flight, the
+      // request was deliberately aborted — don't mark it failed
+      const current = getDb().prepare('SELECT status FROM chunks WHERE id=?').get(chunk.id) as unknown as
+        | { status: string }
+        | undefined;
+      if (current?.status === 'pending') return;
       this.noteChunkFailed(jobId, chunk, err);
     } finally {
       this.activeRegens.delete(chunk.id);
@@ -283,6 +296,8 @@ export class TtsQueue {
     let wav: Buffer | undefined;
     let lastError: unknown;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const aborter = new AbortController();
+      this.aborters.set(chunk.id, aborter);
       try {
         const candidate = await this.client.synthesize({
           input: chunk.text,
@@ -292,6 +307,7 @@ export class TtsQueue {
           guidanceScale: book.guidance_scale,
           speed: book.speed === 1 ? undefined : book.speed,
           seed: seedForAttempt(attempt),
+          signal: aborter.signal,
         });
         const info = readWavInfo(candidate);
         if (info.durationMs < 250) {
@@ -306,6 +322,8 @@ export class TtsQueue {
         // parse failures on valid-size responses are treated as degenerate too
         if (err instanceof Error && err.message.includes('WAV data chunk missing')) continue;
         throw err;
+      } finally {
+        this.aborters.delete(chunk.id);
       }
     }
     if (!wav) {

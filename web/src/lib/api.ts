@@ -133,7 +133,10 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
     }
     throw new Error(detail);
   }
-  return (await res.json()) as T;
+  // some action endpoints return 200 with an empty body — don't crash on them
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 export const api = {
