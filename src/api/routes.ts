@@ -100,6 +100,27 @@ export function registerRoutes(app: FastifyInstance): void {
 
     const genWallMs = jobStats.reduce((a, j) => a + j.wallMs, 0);
     const genAudioMs = jobStats.reduce((a, j) => a + j.audioMs, 0);
+
+    // priority regenerations (not jobs) — shown as their own activity rows
+    const regens = queue.getRegenActivity().map((r) => {
+      const info = db
+        .prepare(
+          `SELECT k.idx AS chunk_idx, c.title AS chapter_title, c.idx AS chapter_idx, b.title AS book_title
+           FROM chunks k JOIN chapters c ON c.id=k.chapter_id JOIN books b ON b.id=k.book_id
+           WHERE k.id=?`,
+        )
+        .get(r.chunkId) as unknown as
+        | { chunk_idx: number; chapter_title: string; chapter_idx: number; book_title: string }
+        | undefined;
+      return {
+        ...r,
+        chunkIdx: (info?.chunk_idx ?? 0) + 1,
+        chapterTitle: info?.chapter_title ?? '',
+        chapterIdx: (info?.chapter_idx ?? 0) + 1,
+        bookTitle: info?.book_title ?? '',
+      };
+    });
+
     return {
       lifetime: {
         ...lifetime,
@@ -107,6 +128,7 @@ export function registerRoutes(app: FastifyInstance): void {
         speedFactor: genWallMs > 0 ? Math.round((genAudioMs / genWallMs) * 100) / 100 : null,
       },
       jobs: jobStats,
+      regens,
     };
   });
 

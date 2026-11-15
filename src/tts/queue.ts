@@ -21,6 +21,7 @@ import { bus, type StudioEvent } from '../bus.js';
  */
 export class TtsQueue {
   private regenQueue = new Map<string, string | undefined>(); // chunkId -> seed override
+  private activeRegens = new Set<string>(); // chunkIds currently synthesizing via priority path
   private client: AudioCppClient;
   private pausedJobs = new Set<string>();
   private active = 0;
@@ -189,7 +190,26 @@ export class TtsQueue {
     const seed = this.regenQueue.get(chunkId);
     this.regenQueue.delete(chunkId);
     getDb().prepare("UPDATE chunks SET status='generating', error=NULL WHERE id=?").run(chunk.id);
+    this.activeRegens.add(chunk.id);
     return { chunk, seed };
+  }
+
+  /** Live regeneration activity for the Queue UI (queued + in-flight). */
+  getRegenActivity(): Array<{ chunkId: string; bookId: string; state: 'queued' | 'generating' }> {
+    const out: Array<{ chunkId: string; bookId: string; state: 'queued' | 'generating' }> = [];
+    for (const chunkId of this.regenQueue.keys()) {
+      const chunk = getDb().prepare('SELECT book_id FROM chunks WHERE id=?').get(chunkId) as unknown as
+        | { book_id: string }
+        | undefined;
+      if (chunk) out.push({ chunkId, bookId: chunk.book_id, state: 'queued' });
+    }
+    for (const chunkId of this.activeRegens) {
+      const chunk = getDb().prepare('SELECT book_id FROM chunks WHERE id=?').get(chunkId) as unknown as
+        | { book_id: string }
+        | undefined;
+      if (chunk) out.push({ chunkId, bookId: chunk.book_id, state: 'generating' });
+    }
+    return out;
   }
 
   private claimNextChunk(): { chunk: ChunkRow; jobId: string } | null {
@@ -225,6 +245,7 @@ export class TtsQueue {
     } catch (err) {
       this.noteChunkFailed(jobId, chunk, err);
     } finally {
+      this.activeRegens.delete(chunk.id);
       if (jobId) this.emitJobUpdate(chunk.book_id);
     }
   }

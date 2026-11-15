@@ -63,6 +63,16 @@ export interface JobStats {
   etaMs: number | null;
 }
 
+export interface RegenActivity {
+  chunkId: string;
+  bookId: string;
+  state: 'queued' | 'generating';
+  chunkIdx: number;
+  chapterTitle: string;
+  chapterIdx: number;
+  bookTitle: string;
+}
+
 export interface Stats {
   lifetime: {
     books: number;
@@ -73,6 +83,7 @@ export interface Stats {
     speedFactor: number | null;
   };
   jobs: Array<JobStats & { jobId: string; bookId: string; title: string }>;
+  regens: RegenActivity[];
 }
 
 export interface Settings {

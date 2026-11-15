@@ -47,6 +47,20 @@ export default function Queue() {
       )}
 
       <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-2">Active</h2>
+      {stats && stats.regens.length > 0 && (
+        <div className="space-y-2 mb-4">
+          {stats.regens.map((r) => (
+            <div key={r.chunkId} className="rounded-xl bg-blue-950/40 border border-blue-900 p-3 flex items-center gap-3">
+              <span className="text-blue-300 text-sm font-medium">♻ Regenerating</span>
+              <StatusBadge status="generating" />
+              <Link to={`/books/${r.bookId}`} className="text-sm hover:underline truncate flex-1">
+                {r.bookTitle} — chapter {r.chapterIdx} ({r.chapterTitle}), chunk #{r.chunkIdx}
+              </Link>
+              <span className="text-xs text-zinc-500">{r.state}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {active.length === 0 && <div className="rounded-xl border border-dashed border-zinc-700 p-8 text-center text-zinc-400 mb-6">Nothing generating. Start a book from its detail page.</div>}
       <div className="space-y-3 mb-8">
         {active.map((b) => (
