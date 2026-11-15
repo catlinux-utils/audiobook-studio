@@ -1,0 +1,91 @@
+# Audiobook Studio
+
+Self-hosted **ebook → audiobook** production studio with a full management WebUI.
+It wraps your local [audio.cpp](https://github.com/0xShug0/audio.cpp) server (e.g. OmniVoice on
+**Vulkan** — no CUDA, no ROCm) and turns EPUB/TXT books into chaptered **.m4b** audiobooks.
+
+**Contents:** [How it works](#how-it-works) · [Install](#install) · [Usage](#usage) ·
+[Features](#features) · [Architecture](#architecture) · [License](#license)
+
+## How it works
+
+```
+EPUB/TXT ──▶ ingest ──▶ chapters ──▶ sentence-aware chunks ──▶ your audio.cpp server (Vulkan)
+                                                                     │  POST /v1/audio/speech
+                library · voices · queue · spot-check  ◀── WebUI ◀───┘  (WAV per chunk)
+                                                                     │
+                                      chunk WAVs ──▶ ffmpeg ──▶ chaptered .m4b (+cover)
+```
+
+The studio **never runs a TTS model itself** — it orchestrates your existing audio.cpp server
+(the one from `omnivoice-vulkan`), so the GPU stays where it is and the model stays loaded.
+
+## Install
+
+Requirements: Node 20+, ffmpeg on PATH, and a running audio.cpp server with an offline TTS model
+(see the `omnivoice-vulkan` repo — `server.bat`).
+
+```bash
+npm install
+npm run seed        # optional: load the public-domain sample books
+npm run build       # build the web UI
+npm start           # serve everything on http://127.0.0.1:8090
+```
+
+Development mode (hot reload, Vite dev server on :5173 proxying /api to :8090):
+
+```bash
+npm run dev
+```
+
+First run: open **Settings**, confirm the audio.cpp URL and model id (defaults:
+`http://127.0.0.1:8080`, model `omnivoice`), then add a **Voice** (a short WAV of the narrator +
+its transcript) and you are ready.
+
+## Usage
+
+1. **Library → Add book** — drop an `.epub` or `.txt`. The parser detects chapters (EPUB spine /
+   TXT heading heuristics incl. "Rozdział", "Chapter", roman numerals) and splits every chapter
+   into sentence-aware chunks that respect OmniVoice's length limits.
+2. **Book detail** — inspect detected chapters and chunks; assign a **voice**; tune steps /
+   guidance / speed / seed / chunk size per book; hit **Generate**.
+3. **Queue** — live progress per book with pause / resume / cancel; failed chunks keep their
+   error messages and can be retried individually.
+4. **Cut map** — every chapter has a visual segment map of its chunks; click a segment to jump
+   into the continuous chapter audio exactly at a cut, or play any chunk in isolation. This is how
+   you *hear where the text was split*.
+5. **🎲 Spot-check** — pulls a random generated chunk with its text for quick quality sampling.
+6. **♻ Regenerate** — any single chunk can be regenerated with a custom seed (A/B takes).
+7. **⬇ Export M4B** — concatenates chunk WAVs, encodes AAC and writes real chapter markers +
+   cover art into a single `.m4b` (stored in `data/exports/`).
+
+## Features
+
+- EPUB (spine-ordered, cover extraction) and TXT ingest with multilingual chapter detection
+- Sentence-aware chunker with Polish + English abbreviation handling (`prof.`, `itd.`, `J. K.`,
+  decimals, dialogue dashes) — never cuts mid-sentence unless unavoidable, and flags soft cuts
+- Per-book voice and synthesis parameters, deterministic seeding for reproducible takes
+- Job queue: pause/resume/cancel, per-chunk retry, live SSE progress
+- QA tooling: random spot-check, cut map with click-to-seek, per-chunk regeneration
+- One-command `.m4b` export with chapter markers + cover (ffmpeg)
+- Bundled public-domain sample books (Polish + English) via `npm run seed`
+- SQLite state (`node:sqlite`, zero native deps), restorable from `data/`
+
+## Architecture
+
+| Path | Contents |
+|---|---|
+| `src/` | Fastify server: `ingest/` (epub, txt, chunker), `tts/` (audio.cpp client, queue), `audio/` (wav headers, ffmpeg assembly), `api/` (REST + SSE) |
+| `web/` | React 19 + Vite + Tailwind SPA (Library, Book detail, Voices, Queue, Settings) |
+| `tests/` | Vitest unit tests (chunker edge cases) |
+| `scripts/` | `seed.ts` (load sample books), `make_samples.py` (rebuild sample EPUBs) |
+| `sample-books/` | Public-domain test books (see LICENSES.md) |
+| `data/` | Runtime state: SQLite DB, per-book chunk WAVs, covers, exports (gitignored) |
+
+API: every UI action is a plain REST call (`/api/books`, `/api/voices`, `/api/jobs`-style controls,
+`/api/events` SSE) — the WebUI is a thin client, so the same pipeline is scriptable with curl.
+
+## License
+
+MIT — see [LICENSE](LICENSE). The studio bundles no models or engines; audio.cpp is Apache-2.0 and
+OmniVoice weights are Apache-2.0 (k2-fsa). Sample books are public domain ([LICENSES.md](sample-books/LICENSES.md)).

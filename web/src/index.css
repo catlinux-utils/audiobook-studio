@@ -1,0 +1,7 @@
+@import 'tailwindcss';
+
+/* slim scrollbars for the chunk lists */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
