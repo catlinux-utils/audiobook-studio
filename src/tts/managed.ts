@@ -40,10 +40,43 @@ class ManagedServer {
     return gguf ? path.join(dir, gguf) : null;
   }
 
+  /** ASR model (CrisperWhisper) — optional; enables voice-prep auto-transcript. */
+  private asrModelDir(): string | null {
+    const dir = path.join(paths.runtime, 'models', 'CrisperWhisper2.0-GGUF');
+    if (!fs.existsSync(dir) || !fs.readdirSync(dir).some((f) => f.endsWith('.gguf'))) return null;
+    return dir;
+  }
+
   /** Generate runtime/server.json from current settings. */
   writeConfig(port: number): void {
     const model = this.modelPath();
     if (!model) throw new Error('OmniVoice model not installed — run setup.ps1 / setup.sh first');
+    const models: Array<Record<string, unknown>> = [
+      {
+        id: 'omnivoice',
+        family: 'omnivoice',
+        path: path.dirname(model),
+        task: 'tts',
+        mode: 'offline',
+        default_request_options: {
+          num_inference_steps: 32,
+          guidance_scale: 2.0,
+        },
+      },
+    ];
+    const asrDir = this.asrModelDir();
+    if (asrDir) {
+      const versions = JSON.parse(fs.readFileSync(path.join(paths.root, 'versions.json'), 'utf8')) as {
+        asr_gguf?: { model_id?: string; family?: string };
+      };
+      models.push({
+        id: versions.asr_gguf?.model_id ?? 'asr',
+        family: versions.asr_gguf?.family ?? 'crisperwhisper',
+        path: asrDir,
+        task: 'asr',
+        mode: 'offline',
+      });
+    }
     const config = {
       host: '127.0.0.1',
       port,
@@ -55,19 +88,7 @@ class ManagedServer {
       ui: false,
       ui_management: false,
       voice_dir: paths.voices,
-      models: [
-        {
-          id: 'omnivoice',
-          family: 'omnivoice',
-          path: path.dirname(model),
-          task: 'tts',
-          mode: 'offline',
-          default_request_options: {
-            num_inference_steps: 32,
-            guidance_scale: 2.0,
-          },
-        },
-      ],
+      models,
     };
     fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2), 'utf8');
   }

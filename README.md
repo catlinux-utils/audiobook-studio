@@ -63,14 +63,20 @@ assign it to a book, hit Generate.
 
 ## Features
 
+- **Voice preparation studio**: load any audio (wav/mp3/m4a/ogg/flac), drag-select the cleanest
+  segment on the waveform, prepare it (cut → mono 24 kHz → loudness normalize → silence trim) and
+  **auto-transcribe** it with a bundled CrisperWhisper ASR model (Polish + 90 languages) — the
+  transcript that makes cloning good, without typing it yourself
 - EPUB (spine-ordered, cover extraction) and TXT ingest with multilingual chapter detection
 - Sentence-aware chunker with Polish + English abbreviation handling (`prof.`, `itd.`, `J. K.`,
   decimals, dialogue dashes) — never cuts mid-sentence unless unavoidable, and flags soft cuts
 - Per-book voice and synthesis parameters, deterministic seeding for reproducible takes
 - Job queue: pause/resume/cancel, per-chunk retry, live SSE progress
+- Generation stats: lifetime + per-book speed factor (×realtime), compute time, ETA
 - QA tooling: random spot-check, cut map with click-to-seek, per-chunk regeneration
 - One-command `.m4b` export with chapter markers + cover (ffmpeg)
-- Bundled public-domain sample books (Polish + English) via `npm run seed`
+- Bundled public-domain sample books (Polish + English) via `npm run seed`, incl. a 90-second
+  Polish test book
 - SQLite state (`node:sqlite`, zero native deps), restorable from `data/`
 
 ## Architecture

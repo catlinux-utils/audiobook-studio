@@ -109,6 +109,27 @@ if (-not $SkipModel) {
         if ((Get-Sha256 $modelDest) -ne $modelSpec.sha256) { throw 'Model install failed final checksum' }
         Write-Host "[ok] model installed -> $modelDest"
     }
+
+    # --- 3. ASR model (auto-transcript for voice preparation) ---
+    $asrSpec = $versions.asr_gguf.'q8_0'
+    $asrDir = Join-Path $root ("runtime\models\" + $versions.asr_gguf.dir)
+    New-Item -ItemType Directory -Force -Path $asrDir | Out-Null
+    $asrDest = Join-Path $asrDir $asrSpec.filename
+    $asrOk = $false
+    if (-not $Force -and (Test-Path $asrDest)) {
+        if ((Get-Sha256 $asrDest) -eq $asrSpec.sha256) {
+            Write-Host "[ok] ASR model already installed (checksum matches)"
+            $asrOk = $true
+        } else {
+            Write-Host "[..] installed ASR model failed checksum, re-downloading"
+        }
+    }
+    if (-not $asrOk) {
+        $asrCache = Get-CachedArtifact $asrSpec "CrisperWhisper ASR model"
+        Move-Item -Path $asrCache -Destination $asrDest -Force
+        if ((Get-Sha256 $asrDest) -ne $asrSpec.sha256) { throw 'ASR model install failed final checksum' }
+        Write-Host "[ok] ASR model installed -> $asrDest"
+    }
 }
 
 Write-Host '=== done — the studio will start this runtime automatically ==='

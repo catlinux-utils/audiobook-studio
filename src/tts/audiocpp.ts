@@ -94,6 +94,26 @@ export class AudioCppClient {
     }
   }
 
+  /**
+   * Transcribe a server-local audio file via POST /v1/audio/transcriptions.
+   * Returns the plain transcript text.
+   */
+  async transcribe(audioPath: string, language?: string, timeoutMs = 300_000): Promise<string> {
+    const body: Record<string, unknown> = { model: this.model, audio: audioPath };
+    if (language) body.language = language;
+    const res = await fetch(this.url('/v1/audio/transcriptions'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) throw new TtsRequestError(res.status, await errorMessage(res));
+    const data = (await res.json()) as Record<string, unknown>;
+    const text = data.text ?? data.transcript ?? data.result;
+    if (typeof text !== 'string') throw new TtsRequestError(res.status, 'unexpected transcription response shape');
+    return text.trim();
+  }
+
   private async synthesizeOnce(req: SynthesizeRequest): Promise<Buffer> {
     const body: Record<string, unknown> = {
       model: this.model,

@@ -114,6 +114,23 @@ if [ "$SKIP_MODEL" -ne 1 ]; then
         [ "$(sha256_of "$MODEL_DEST")" = "$SHA256" ] || { echo "Model install failed final checksum" >&2; exit 1; }
         echo "[ok] model installed -> $MODEL_DEST"
     fi
+
+    # --- 3. ASR model (auto-transcript for voice preparation) ---
+    eval "$(read_spec "versions['asr_gguf']['q8_0']")"
+    ASR_DIR="runtime/models/$(python3 -c 'import json; print(json.load(open("versions.json"))["asr_gguf"]["dir"])')"
+    mkdir -p "$ASR_DIR"
+    ASR_DEST="$ASR_DIR/$FILENAME"
+    ASR_OK=0
+    if [ "$FORCE" -ne 1 ] && [ -f "$ASR_DEST" ] && [ "$(sha256_of "$ASR_DEST")" = "$SHA256" ]; then
+        echo "[ok] ASR model already installed (checksum matches)"
+        ASR_OK=1
+    fi
+    if [ "$ASR_OK" -ne 1 ]; then
+        fetch "$CACHE/$FILENAME" "$URL" "$SHA256" "CrisperWhisper ASR model"
+        mv "$CACHE/$FILENAME" "$ASR_DEST"
+        [ "$(sha256_of "$ASR_DEST")" = "$SHA256" ] || { echo "ASR model install failed final checksum" >&2; exit 1; }
+        echo "[ok] ASR model installed -> $ASR_DEST"
+    fi
 fi
 
 echo "=== done — the studio will start this runtime automatically ==="

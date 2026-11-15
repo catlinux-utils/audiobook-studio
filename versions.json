@@ -33,5 +33,20 @@
         "sri": "sha256-DlpyHt0bCNkGfvZvQN7WCaaxT1qERccD+YaXNsq9NQo="
       }
     }
+  },
+  "asr_gguf": {
+    "$comment": "CrisperWhisper 2.0 Large — verbatim Whisper-based ASR with Polish support; used by the voice-preparation auto-transcript tool.",
+    "repo": "audio-cpp/audio.cpp-gguf",
+    "revision": "ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7",
+    "dir": "CrisperWhisper2.0-GGUF",
+    "model_id": "asr",
+    "family": "crisperwhisper",
+    "q8_0": {
+      "filename": "crisperwhisper-2-large-q8_0.gguf",
+      "url": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7/CrisperWhisper2.0-GGUF/crisperwhisper-2-large-q8_0.gguf",
+      "size_bytes": 1721000000,
+      "sha256": "392e636876d6d5ae8716f0f98b78480b61bb8c199d63f20523e95308b3425c2e",
+      "sri": "sha256-OS5jaHbW1a6HFvD5i3hIC2G7jBmdY/IFI+lTCLNCXC4="
+    }
   }
 }

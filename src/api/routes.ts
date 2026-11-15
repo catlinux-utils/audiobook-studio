@@ -14,6 +14,7 @@ import { readWavInfo } from '../audio/wavmeta.js';
 import { assembleChapter, exportM4b, exportChapterMp3 } from '../audio/assemble.js';
 import { bus } from '../bus.js';
 import { ttsBaseUrl } from '../tts/managed.js';
+import { spawn } from 'node:child_process';
 
 const MAX_VOICE_WAV_BYTES = 3.5 * 1024 * 1024; // inline voice_ref payloads are capped at 5 MiB base64
 
@@ -482,6 +483,112 @@ export function registerRoutes(app: FastifyInstance): void {
       return reply.type('audio/wav').send(wav);
     } catch (err) {
       return reply.code(502).send({ error: `TTS failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  });
+
+  // ---------- voice preparation & auto-transcript ----------
+
+  /** Run ffmpeg with args, capturing stderr for error messages. */
+  function ffmpegRun(args: string[]): Promise<string> {
+    const s = loadSettings();
+    return new Promise((resolve, reject) => {
+      const child = spawn(s.ffmpegPath || 'ffmpeg', args, { windowsHide: true });
+      let stderr = '';
+      child.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString();
+        if (stderr.length > 4000) stderr = stderr.slice(-4000);
+      });
+      child.on('error', (err) => reject(new Error(`ffmpeg not available: ${err.message}`)));
+      child.on('close', (code) => (code === 0 ? resolve(stderr) : reject(new Error(`ffmpeg failed: ${stderr.trim().split('\n').pop() ?? code}`))));
+    });
+  }
+
+  /**
+   * Prepare a reference clip for cloning: cut [start,end] (seconds), convert
+   * to mono 24 kHz 16-bit WAV, optionally normalize loudness, trim edge
+   * silence. Returns the processed WAV bytes (must stay <= 3.5 MiB for the
+   * inline voice_ref payload).
+   */
+  app.post('/api/voices/prepare', async (req, reply) => {
+    const parts = req.parts({ limits: { fileSize: 200 * 1024 * 1024 } });
+    let fileBuf: Buffer | null = null;
+    let fileName = 'input';
+    let start = 0;
+    let end: number | null = null;
+    let normalize = true;
+    for await (const part of parts) {
+      if (part.type === 'file' && part.fieldname === 'file') {
+        fileBuf = await part.toBuffer();
+        fileName = part.filename || fileName;
+      } else if (part.type === 'field') {
+        if (part.fieldname === 'start') start = Math.max(0, Number(part.value) || 0);
+        if (part.fieldname === 'end' && part.value !== '') end = Math.max(0, Number(part.value));
+        if (part.fieldname === 'normalize') normalize = part.value === 'true';
+      }
+    }
+    if (!fileBuf) return reply.code(400).send({ error: 'file is required' });
+
+    const tmpIn = path.join(paths.data, `prep-${randomUUID()}${path.extname(fileName) || '.audio'}`);
+    const tmpOut = path.join(paths.data, `prep-${randomUUID()}.wav`);
+    fs.writeFileSync(tmpIn, fileBuf);
+    try {
+      const filters = ['silenceremove=start_periods=1:start_threshold=-45dB'];
+      if (normalize) filters.push('loudnorm=I=-20:TP=-1.5:LRA=7');
+      const args = ['-y', '-i', tmpIn];
+      if (end !== null && end > start) args.push('-ss', String(start), '-to', String(end));
+      else if (start > 0) args.push('-ss', String(start));
+      args.push('-af', filters.join(','), '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', tmpOut);
+      await ffmpegRun(args);
+      const wav = fs.readFileSync(tmpOut);
+      if (wav.length > MAX_VOICE_WAV_BYTES) {
+        return reply.code(422).send({
+          error: `prepared clip is too long (${Math.round((wav.length - 44) / 48000)} s at 24 kHz); select a shorter region (max ~70 s)`,
+        });
+      }
+      const info = readWavInfo(wav);
+      return reply
+        .type('audio/wav')
+        .header('X-Prepared-Duration-Ms', String(info.durationMs))
+        .send(wav);
+    } catch (err) {
+      return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      fs.rmSync(tmpIn, { force: true });
+      fs.rmSync(tmpOut, { force: true });
+    }
+  });
+
+  /** Auto-transcribe a (prepared) WAV via the managed CrisperWhisper ASR model. */
+  app.post('/api/voices/transcribe', async (req, reply) => {
+    const parts = req.parts({ limits: { fileSize: MAX_VOICE_WAV_BYTES * 2 } });
+    let wav: Buffer | null = null;
+    let language = '';
+    for await (const part of parts) {
+      if (part.type === 'file' && part.fieldname === 'file') wav = await part.toBuffer();
+      else if (part.type === 'field' && part.fieldname === 'language') language = String(part.value).trim();
+    }
+    if (!wav) return reply.code(400).send({ error: 'file is required' });
+    try {
+      readWavInfo(wav);
+    } catch {
+      return reply.code(422).send({ error: 'file must be a WAV (use the prepared clip)' });
+    }
+
+    const s = loadSettings();
+    const tmp = path.join(paths.data, `asr-${randomUUID()}.wav`);
+    const tmp16 = path.join(paths.data, `asr-${randomUUID()}-16k.wav`);
+    fs.writeFileSync(tmp, wav);
+    try {
+      // Whisper-family models want 16 kHz mono
+      await ffmpegRun(['-y', '-i', tmp, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tmp16]);
+      const client = new AudioCppClient(ttsBaseUrl(), 'asr');
+      const text = await client.transcribe(tmp16, language || undefined);
+      return { text };
+    } catch (err) {
+      return reply.code(502).send({ error: `transcription failed: ${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      fs.rmSync(tmp, { force: true });
+      fs.rmSync(tmp16, { force: true });
     }
   });
 
