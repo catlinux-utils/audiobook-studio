@@ -601,6 +601,123 @@ export function registerRoutes(app: FastifyInstance): void {
       .send(fs.createReadStream(record.path));
   });
 
+  // ---------- global exports ----------
+
+  /** All exports across all books (for the Exports tab). */
+  app.get('/api/exports', async () => {
+    const db = getDb();
+    const rows = db
+      .prepare(
+        `SELECT e.id, e.book_id, e.format, e.path, e.chapter_count, e.duration_ms, e.created_at, e.qa_summary,
+                b.title AS book_title
+         FROM exports e JOIN books b ON b.id=e.book_id
+         ORDER BY e.created_at DESC`,
+      )
+      .all() as unknown as Array<{
+      id: string;
+      book_id: string;
+      format: string;
+      path: string;
+      chapter_count: number;
+      duration_ms: number;
+      created_at: string;
+      qa_summary: string | null;
+      book_title: string;
+    }>;
+    return rows.map((x) => ({
+      id: x.id,
+      bookId: x.book_id,
+      bookTitle: x.book_title,
+      format: x.format,
+      path: x.path,
+      chapterCount: x.chapter_count,
+      durationMs: x.duration_ms,
+      createdAt: x.created_at,
+      qaSummary: x.qa_summary ? JSON.parse(x.qa_summary) : null,
+      sizeBytes: fs.existsSync(x.path) ? fs.statSync(x.path).size : null,
+    }));
+  });
+
+  /**
+   * Re-encode an export to fit under a target size (e.g. Discord's upload
+   * limit). Bitrate is derived from the duration; if even the 16 kbps floor
+   * cannot reach the target the result is returned with fitsTarget=false.
+   */
+  app.post('/api/exports/:id/compress', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const db = getDb();
+    const record = db.prepare('SELECT * FROM exports WHERE id=?').get(id) as unknown as
+      | { id: string; book_id: string; format: string; path: string; chapter_count: number; duration_ms: number; created_at: string; qa_summary: string | null }
+      | undefined;
+    if (!record) return reply.code(404).send({ error: 'export not found' });
+    if (!fs.existsSync(record.path)) return reply.code(409).send({ error: 'export file is missing on disk' });
+    const body = (req.body ?? {}) as { targetMB?: number };
+    const targetMB = Math.max(1, Math.min(2000, Number(body.targetMB) || 20));
+    const durationS = record.duration_ms / 1000;
+    if (durationS <= 0) return reply.code(409).send({ error: 'unknown export duration' });
+
+    const targetBytes = targetMB * 1024 * 1024 * 0.96; // container headroom
+    let kbps = Math.floor((targetBytes * 8) / 1000 / durationS);
+    const minKbps = 16;
+    const fitsTarget = kbps >= minKbps;
+    if (!fitsTarget) kbps = minKbps;
+
+    const ext = path.extname(record.path).toLowerCase();
+    const base = path.basename(record.path, ext);
+    const out = path.join(path.dirname(record.path), `${base} (${targetMB}MB)${ext}`);
+    if (ext === '.m4b') {
+      // keep chapter markers + embedded cover; re-encode audio only
+      await runFfmpeg([
+        '-y', '-i', record.path,
+        '-map', '0:a', '-map', '0:v?',
+        '-c:v', 'copy', '-c:a', 'aac', '-b:a', `${kbps}k`,
+        '-disposition:v:0', 'attached_pic',
+        '-map_chapters', '0', '-map_metadata', '0',
+        '-f', 'mp4', out,
+      ]);
+    } else {
+      await runFfmpeg(['-y', '-i', record.path, '-codec:a', 'libmp3lame', '-b:a', `${kbps}k`, out]);
+    }
+    const sizeBytes = fs.statSync(out).size;
+
+    // compressing the same export twice re-points at the existing row
+    const existing = db.prepare('SELECT id FROM exports WHERE path=?').get(out) as unknown as { id: string } | undefined;
+    let exportId: string;
+    if (existing) {
+      exportId = existing.id;
+      db.prepare('UPDATE exports SET created_at=? WHERE id=?').run(new Date().toISOString(), exportId);
+    } else {
+      exportId = randomUUID();
+      db.prepare('INSERT INTO exports (id, book_id, format, path, chapter_count, duration_ms, created_at, qa_summary) VALUES (?,?,?,?,?,?,?,?)').run(
+        exportId, record.book_id, record.format, out, record.chapter_count, record.duration_ms, new Date().toISOString(), record.qa_summary,
+      );
+    }
+    const bookStatus = (db.prepare('SELECT status FROM books WHERE id=?').get(record.book_id) as unknown as { status: string } | undefined)?.status ?? 'draft';
+    bus.emit('event', { type: 'book.update', bookId: record.book_id, status: bookStatus });
+    const row = db
+      .prepare(
+        `SELECT e.*, b.title AS book_title FROM exports e JOIN books b ON b.id=e.book_id WHERE e.id=?`,
+      )
+      .get(exportId) as unknown as { id: string; book_id: string; format: string; path: string; chapter_count: number; duration_ms: number; created_at: string; qa_summary: string | null; book_title: string };
+    return {
+      export: {
+        id: row.id,
+        bookId: row.book_id,
+        bookTitle: row.book_title,
+        format: row.format,
+        path: row.path,
+        chapterCount: row.chapter_count,
+        durationMs: row.duration_ms,
+        createdAt: row.created_at,
+        qaSummary: row.qa_summary ? JSON.parse(row.qa_summary) : null,
+        sizeBytes,
+      },
+      bitrateKbps: kbps,
+      fitsTarget,
+      targetMB,
+    };
+  });
+
   // ---------- QA spot-check ----------
   app.post('/api/books/:id/qa/random', async (req, reply) => {
     const { id } = req.params as { id: string };

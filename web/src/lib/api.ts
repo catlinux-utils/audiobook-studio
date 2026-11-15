@@ -172,6 +172,19 @@ export interface QaSummary {
   reportFile: string | null;
 }
 
+export interface ExportRow {
+  id: string;
+  bookId: string;
+  bookTitle: string;
+  format: string;
+  path: string;
+  chapterCount: number;
+  durationMs: number;
+  createdAt: string;
+  qaSummary: QaSummary | null;
+  sizeBytes: number | null;
+}
+
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method,
@@ -228,6 +241,13 @@ export const api = {
     req<Array<{ id: string; path: string; format: string; chapter_count: number; duration_ms: number; created_at: string; qaSummary: QaSummary | null }>>(
       'GET',
       `/api/books/${id}/exports`,
+    ),
+  listAllExports: () => req<ExportRow[]>('GET', '/api/exports'),
+  compressExport: (id: string, targetMB: number) =>
+    req<{ export: ExportRow; bitrateKbps: number; fitsTarget: boolean; targetMB: number }>(
+      'POST',
+      `/api/exports/${id}/compress`,
+      { targetMB },
     ),
 
   regenerateChunk: (id: string, seed?: string) =>

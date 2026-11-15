@@ -6,6 +6,7 @@ import Library from './pages/Library';
 import BookDetail from './pages/BookDetail';
 import Voices from './pages/Voices';
 import Queue from './pages/Queue';
+import Exports from './pages/Exports';
 import Settings from './pages/Settings';
 
 const navItem =
@@ -24,6 +25,7 @@ function App() {
             <nav className="flex gap-1">
               <NavLink to="/" end className={navItem}>Library</NavLink>
               <NavLink to="/queue" className={navItem}>Queue</NavLink>
+              <NavLink to="/exports" className={navItem}>Exports</NavLink>
               <NavLink to="/voices" className={navItem}>Voices</NavLink>
               <NavLink to="/settings" className={navItem}>Settings</NavLink>
             </nav>
@@ -34,6 +36,7 @@ function App() {
             <Route path="/" element={<Library />} />
             <Route path="/books/:id" element={<BookDetail />} />
             <Route path="/queue" element={<Queue />} />
+            <Route path="/exports" element={<Exports />} />
             <Route path="/voices" element={<Voices />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
