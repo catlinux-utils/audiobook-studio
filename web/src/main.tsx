@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
+import './index.css';
 import Library from './pages/Library';
 import BookDetail from './pages/BookDetail';
 import Voices from './pages/Voices';
