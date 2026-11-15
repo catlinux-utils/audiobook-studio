@@ -15,14 +15,15 @@ import { bus, type StudioEvent } from '../bus.js';
  * a time (per configured concurrency), synthesized on the audio.cpp server,
  * written to data/books/<bookId>/chunks/, and their status/duration recorded.
  * Pause finishes the in-flight chunk and stops claiming; cancel keeps completed
- * work and releases the job. Single-chunk regeneration bypasses the queue but
- * is rejected while the book has a running job.
+ * work and releases the job. Single-chunk regeneration goes through the same
+ * worker as a priority request: it preempts job chunk claiming, so it works
+ * even while the book's generation job is running.
  */
 export class TtsQueue {
+  private regenQueue = new Map<string, string | undefined>(); // chunkId -> seed override
   private client: AudioCppClient;
   private pausedJobs = new Set<string>();
   private active = 0;
-  private regenerateLocks = new Set<string>();
   private pumping = false;
 
   constructor() {
@@ -132,22 +133,19 @@ export class TtsQueue {
   }
 
   /**
-   * Regenerate a single chunk immediately (bypasses the queue). Rejected while
-   * a generation job is active for the same book.
+   * Queue a single-chunk regeneration as a PRIORITY request: the worker picks
+   * it up before job chunks, so it works even while the book's generation job
+   * is running (and shares the concurrency limit with it).
    */
   async regenerateChunk(chunkId: string, seed?: string): Promise<{ ok: true } | { error: string }> {
     const db = getDb();
     const chunk = db.prepare('SELECT * FROM chunks WHERE id=?').get(chunkId) as unknown as ChunkRow | undefined;
     if (!chunk) return { error: 'chunk not found' };
-    if (this.regenerateLocks.has(chunk.book_id)) return { error: 'a generation job is active for this book' };
-    this.regenerateLocks.add(chunk.book_id);
-    try {
-      await this.synthesizeChunk(chunk, seed);
-      return { ok: true };
-    } finally {
-      this.regenerateLocks.delete(chunk.book_id);
-      this.pump();
-    }
+    if (this.regenQueue.has(chunkId)) return { error: 'this chunk is already queued for regeneration' };
+    if (chunk.status === 'generating') return { error: 'chunk is currently generating — wait for it to finish' };
+    this.regenQueue.set(chunkId, seed);
+    this.pump();
+    return { ok: true };
   }
 
   private pump(): void {
@@ -156,10 +154,14 @@ export class TtsQueue {
     try {
       const maxConcurrency = Math.max(1, loadSettings().concurrency);
       while (this.active < maxConcurrency) {
-        const claimed = this.claimNextChunk();
+        // priority: queued chunk regenerations preempt job chunk claiming
+        const regen = this.claimNextRegen();
+        const claimed = regen ?? this.claimNextChunk();
         if (!claimed) break;
         this.active++;
-        void this.runChunk(claimed.chunk, claimed.jobId)
+        const jobId = 'jobId' in claimed ? (claimed.jobId as string) : null;
+        const seed = 'seed' in claimed ? (claimed.seed as string | undefined) : undefined;
+        void this.runChunk(claimed.chunk, jobId, seed)
           .catch((err) => {
             // runChunk handles its own errors; this guards unexpected throws
             console.error('chunk runner crashed:', err);
@@ -172,6 +174,22 @@ export class TtsQueue {
     } finally {
       this.pumping = false;
     }
+  }
+
+  /** Pop the oldest queued regeneration, if its chunk can be claimed now. */
+  private claimNextRegen(): { chunk: ChunkRow; seed: string | undefined } | null {
+    const chunkId = this.regenQueue.keys().next().value as string | undefined;
+    if (chunkId === undefined) return null;
+    const chunk = getDb().prepare('SELECT * FROM chunks WHERE id=?').get(chunkId) as unknown as ChunkRow | undefined;
+    if (!chunk) {
+      this.regenQueue.delete(chunkId);
+      return null;
+    }
+    if (chunk.status === 'generating') return null; // busy; retry on next pump tick
+    const seed = this.regenQueue.get(chunkId);
+    this.regenQueue.delete(chunkId);
+    getDb().prepare("UPDATE chunks SET status='generating', error=NULL WHERE id=?").run(chunk.id);
+    return { chunk, seed };
   }
 
   private claimNextChunk(): { chunk: ChunkRow; jobId: string } | null {
@@ -200,14 +218,14 @@ export class TtsQueue {
     return null;
   }
 
-  private async runChunk(chunk: ChunkRow, jobId: string): Promise<void> {
+  private async runChunk(chunk: ChunkRow, jobId: string | null, seedOverride?: string): Promise<void> {
     try {
-      const { durationMs } = await this.synthesizeChunk(chunk);
+      const { durationMs } = await this.synthesizeChunk(chunk, seedOverride);
       this.noteChunkDone(jobId, chunk, durationMs);
     } catch (err) {
       this.noteChunkFailed(jobId, chunk, err);
     } finally {
-      this.emitJobUpdate(chunk.book_id);
+      if (jobId) this.emitJobUpdate(chunk.book_id);
     }
   }
 
@@ -296,20 +314,21 @@ export class TtsQueue {
     return { durationMs: info.durationMs };
   }
 
-  private noteChunkDone(jobId: string, chunk: ChunkRow, durationMs: number): void {
+  private noteChunkDone(jobId: string | null, chunk: ChunkRow, durationMs: number): void {
+    if (jobId === null) return; // priority regeneration — no job to account for
     const db = getDb();
     db.prepare('UPDATE jobs SET done_chunks=done_chunks+1, audio_ms=audio_ms+? WHERE id=?').run(durationMs, jobId);
     this.finishJobIfComplete(chunk.book_id, jobId);
   }
 
-  private noteChunkFailed(jobId: string, chunk: ChunkRow, err: unknown): void {
+  private noteChunkFailed(jobId: string | null, chunk: ChunkRow, err: unknown): void {
     const db = getDb();
     const message = err instanceof Error ? err.message : String(err);
     db.prepare("UPDATE chunks SET status='failed', error=?, attempts=attempts+1 WHERE id=?").run(
       message.slice(0, 500),
       chunk.id,
     );
-    db.prepare('UPDATE jobs SET failed_chunks=failed_chunks+1 WHERE id=?').run(jobId);
+    if (jobId !== null) db.prepare('UPDATE jobs SET failed_chunks=failed_chunks+1 WHERE id=?').run(jobId);
     this.emit({
       type: 'chunk.update',
       bookId: chunk.book_id,
