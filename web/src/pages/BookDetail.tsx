@@ -98,6 +98,8 @@ export default function BookDetail() {
 
   const doneChunks = book.chunks_done ?? 0;
   const totalChunks = book.chunk_count ?? 0;
+  // pending (or retryable) chunks of the currently selected chapter
+  const chapterPending = chapterData ? chapterData.chapter.chunk_count - chapterData.chapter.chunks_done : 0;
   const canGenerate = Boolean(book.voice_id) && doneChunks < totalChunks;
 
   return (
@@ -172,7 +174,8 @@ export default function BookDetail() {
             <span>total audio: {formatDuration(book.duration_ms)}</span>
             {book.job && book.job.state === 'running' && book.job.speedFactor && (
               <span className="text-blue-300">
-                {book.job.speedFactor.toFixed(2)}× realtime
+                {book.job.chapterTitle && <span className="text-blue-400/80">{book.job.chapterTitle} · </span>}
+                {book.job.done}/{book.job.total} chunks in job · {book.job.speedFactor.toFixed(2)}× realtime
                 {book.job.etaMs ? ` · ETA ${formatSpan(book.job.etaMs)}` : ''}
               </span>
             )}
@@ -192,6 +195,22 @@ export default function BookDetail() {
             {book.status === 'generating' || book.status === 'paused' ? (
               <Button variant="danger" onClick={() => act('cancel', () => api.cancel(id))}>Cancel</Button>
             ) : null}
+            {chapterData && (
+              <Button
+                variant="ghost"
+                disabled={busy !== '' || !book.voice_id || chapterPending === 0}
+                onClick={() => chapterId && act('queue-ch', () => api.generateChapter(id, chapterId).then(refreshBook))}
+                title={
+                  !book.voice_id
+                    ? 'assign a voice first'
+                    : chapterPending === 0
+                      ? 'this chapter has no pending chunks'
+                      : `add the selected chapter to the generation queue (${chapterPending} chunks; chapters run one after another)`
+                }
+              >
+                ⚡ Queue chapter{chapterPending > 0 ? ` (${chapterPending})` : ''}
+              </Button>
+            )}
             <Button
               disabled={busy !== '' || doneChunks === 0}
               onClick={() => act('export', async () => {

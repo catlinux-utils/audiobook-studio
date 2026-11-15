@@ -75,9 +75,18 @@ export default function Queue() {
               </span>
               {(() => {
                 const j = jobFor(b.id);
-                if (!j || j.state !== 'running') return null;
+                if (!j) return null;
+                if (j.state === 'queued') {
+                  return (
+                    <span className="text-xs text-amber-300">
+                      ⏳ {j.chapterTitle ? `${j.chapterTitle} queued` : 'queued'}
+                    </span>
+                  );
+                }
+                if (j.state !== 'running') return null;
                 return (
                   <span className="text-xs text-blue-300">
+                    {j.chapterTitle && <span className="text-blue-400/80">{j.chapterTitle} · </span>}
                     {j.speedFactor ? `${j.speedFactor.toFixed(2)}× realtime` : ''}
                     {j.etaMs ? ` · ETA ${formatSpan(j.etaMs)}` : ''}
                   </span>

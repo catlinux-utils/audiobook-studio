@@ -71,10 +71,12 @@ export function registerRoutes(app: FastifyInstance): void {
     };
     const allJobs = db
       .prepare(
-        `SELECT j.*, b.title FROM jobs j JOIN books b ON b.id=j.book_id
+        `SELECT j.*, b.title,
+           (SELECT c.title FROM chapters c WHERE c.id=j.chapter_id) AS chapter_title
+         FROM jobs j JOIN books b ON b.id=j.book_id
          WHERE j.audio_ms > 0 ORDER BY j.created_at DESC`,
       )
-      .all() as unknown as Array<JobStat & { title: string }>;
+      .all() as unknown as Array<JobStat & { title: string; chapter_title: string | null }>;
 
     const now = Date.now();
     const jobStats = allJobs.map((j) => {
@@ -89,6 +91,7 @@ export function registerRoutes(app: FastifyInstance): void {
         jobId: j.id,
         bookId: j.book_id,
         title: j.title,
+        chapterTitle: j.chapter_title ?? undefined,
         state: j.state,
         done: j.done_chunks,
         total: j.total_chunks,
@@ -219,27 +222,65 @@ export function registerRoutes(app: FastifyInstance): void {
       : undefined;
     const job = db
       .prepare(
-        `SELECT id, state, total_chunks, done_chunks, failed_chunks, audio_ms, wall_ms, started_at
+        `SELECT id, state, chapter_id, total_chunks, done_chunks, failed_chunks, audio_ms, wall_ms, started_at,
+           (SELECT c.title FROM chapters c WHERE c.id=jobs.chapter_id) AS chapter_title
          FROM jobs WHERE book_id=? ORDER BY created_at DESC LIMIT 1`,
       )
       .get(id) as unknown as
-      | { id: string; state: string; total_chunks: number; done_chunks: number; failed_chunks: number; audio_ms: number; wall_ms: number; started_at: string | null }
+      | {
+          id: string;
+          state: string;
+          chapter_id: string | null;
+          total_chunks: number;
+          done_chunks: number;
+          failed_chunks: number;
+          audio_ms: number;
+          wall_ms: number;
+          started_at: string | null;
+          chapter_title: string | null;
+        }
       | undefined;
-    let jobStats: { state: string; done: number; total: number; failed: number; audioMs: number; wallMs: number; speedFactor: number | null; etaMs: number | null } | null = null;
+    let jobStats: {
+      state: string;
+      done: number;
+      total: number;
+      failed: number;
+      audioMs: number;
+      wallMs: number;
+      speedFactor: number | null;
+      etaMs: number | null;
+      chapterTitle?: string;
+    } | null = null;
     if (job && job.audio_ms > 0) {
+      // progress is scoped to the job's chapter when it is a chapter job
+      const scope = job.chapter_id ? 'AND k.chapter_id=?' : '';
+      const scopeArgs: Array<string> = job.chapter_id ? [job.chapter_id] : [];
+      const counts = db
+        .prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope}) AS total,
+             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope} AND k.status='done') AS done,
+             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope} AND k.status='failed') AS failed`,
+        )
+        .get(id, ...scopeArgs, id, ...scopeArgs, id, ...scopeArgs) as unknown as {
+        total: number;
+        done: number;
+        failed: number;
+      };
       const liveWall = job.wall_ms + (job.started_at ? Date.now() - Date.parse(job.started_at) : 0);
       const speed = liveWall > 0 ? job.audio_ms / liveWall : 0;
-      const remaining = Math.max(0, job.total_chunks - job.done_chunks);
-      const avgChunkAudio = job.done_chunks > 0 ? job.audio_ms / job.done_chunks : 0;
+      const remaining = Math.max(0, counts.total - counts.done);
+      const avgChunkAudio = counts.done > 0 ? job.audio_ms / counts.done : 0;
       jobStats = {
         state: job.state,
-        done: job.done_chunks,
-        total: job.total_chunks,
-        failed: job.failed_chunks,
+        done: counts.done,
+        total: counts.total,
+        failed: counts.failed,
         audioMs: job.audio_ms,
         wallMs: liveWall,
         speedFactor: speed > 0 ? Math.round(speed * 100) / 100 : null,
         etaMs: job.state === 'running' && speed > 0 && remaining > 0 ? Math.round((remaining * avgChunkAudio) / speed) : null,
+        ...(job.chapter_title ? { chapterTitle: job.chapter_title } : {}),
       };
     }
     return { ...book, voice: voice ?? null, job: jobStats, chapters };
@@ -341,6 +382,22 @@ export function registerRoutes(app: FastifyInstance): void {
     if (!book) return reply.code(404).send({ error: 'book not found' });
     if (!book.voice_id) return reply.code(400).send({ error: 'assign a voice first' });
     const result = queue.startBook(id);
+    if ('error' in result) return reply.code(409).send(result);
+    return result;
+  });
+
+  /** Generate only the given chapter's pending chunks (a chapter-scoped job). */
+  app.post('/api/books/:id/chapters/:chapterId/generate', async (req, reply) => {
+    const { id, chapterId } = req.params as { id: string; chapterId: string };
+    const db = getDb();
+    const book = db.prepare('SELECT * FROM books WHERE id=?').get(id) as unknown as BookRow | undefined;
+    if (!book) return reply.code(404).send({ error: 'book not found' });
+    if (!book.voice_id) return reply.code(400).send({ error: 'assign a voice first' });
+    const chapter = db
+      .prepare('SELECT id FROM chapters WHERE id=? AND book_id=?')
+      .get(chapterId, id) as unknown as { id: string } | undefined;
+    if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
+    const result = queue.startBook(id, chapterId);
     if ('error' in result) return reply.code(409).send(result);
     return result;
   });

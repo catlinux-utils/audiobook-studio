@@ -61,6 +61,8 @@ export interface JobStats {
   wallMs: number;
   speedFactor: number | null;
   etaMs: number | null;
+  /** set when the job only covers one chapter */
+  chapterTitle?: string;
 }
 
 export interface RegenActivity {
@@ -193,6 +195,8 @@ export const api = {
   updateBook: (id: string, patch: Record<string, unknown>) => req<Book>('PATCH', `/api/books/${id}`, patch),
   deleteBook: (id: string) => req<{ ok: boolean }>('DELETE', `/api/books/${id}`),
   generate: (id: string) => req<{ jobId?: string; error?: string }>('POST', `/api/books/${id}/generate`),
+  generateChapter: (bookId: string, chapterId: string) =>
+    req<{ jobId?: string; error?: string }>('POST', `/api/books/${bookId}/chapters/${chapterId}/generate`),
   pause: (id: string) => req('POST', `/api/books/${id}/pause`),
   cancel: (id: string) => req('POST', `/api/books/${id}/cancel`),
   rechunk: (id: string) => req('POST', `/api/books/${id}/rechunk`),

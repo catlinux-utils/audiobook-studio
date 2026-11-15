@@ -40,9 +40,11 @@ export class TtsQueue {
 
   private recoverOnStartup(): void {
     const db = getDb();
-    // chunks stuck 'generating' from a previous crash go back to pending
+    // chunks stuck 'generating' from a previous crash go back to pending;
+    // open jobs (running or waiting in the chapter queue) stop — resuming is
+    // an explicit user action, never something the server does on its own
     db.prepare("UPDATE chunks SET status='pending' WHERE status='generating'").run();
-    db.prepare("UPDATE jobs SET state='paused' WHERE state='running'").run();
+    db.prepare("UPDATE jobs SET state='paused' WHERE state IN ('running','queued')").run();
     db.prepare("UPDATE books SET status='paused' WHERE status='generating' OR status='queued'").run();
   }
 
@@ -50,59 +52,183 @@ export class TtsQueue {
     bus.emit('event', ev);
   }
 
-  /** Queue all pending chunks of a book. Reuses an open job when present. */
-  startBook(bookId: string): { jobId: string } | { error: string } {
+  /**
+   * Queue work for a book: either the whole book (chapterId omitted) or one
+   * chapter. Chapter requests join a FIFO chapter queue — they run one after
+   * another as the worker frees up; several chapters can wait at once.
+   */
+  startBook(bookId: string, chapterId?: string): { jobId: string } | { error: string } {
     const db = getDb();
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(bookId) as unknown as BookRow | undefined;
     if (!book) return { error: 'book not found' };
+
+    if (!chapterId) {
+      return this.startBookWide(bookId);
+    }
+
+    const chapter = db
+      .prepare('SELECT id, title FROM chapters WHERE id=? AND book_id=?')
+      .get(chapterId, bookId) as unknown as { id: string; title: string } | undefined;
+    if (!chapter) return { error: 'chapter not found' };
+
+    const pending = db
+      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND chapter_id=? AND status IN ('pending','failed')")
+      .get(bookId, chapterId) as unknown as { n: number };
+    if (pending.n === 0) return { error: 'this chapter has no pending chunks' };
+
+    // an open book-wide job covers this chapter already / blocks scoping
+    const bookWide = db
+      .prepare("SELECT id, state FROM jobs WHERE book_id=? AND chapter_id IS NULL AND state IN ('running','paused','queued') LIMIT 1")
+      .get(bookId) as unknown as { id: string; state: string } | undefined;
+    if (bookWide && bookWide.state === 'running') {
+      return { error: 'book-wide generation is already running — it covers this chapter' };
+    }
+    if (bookWide) {
+      // paused book-wide job is superseded by an explicit chapter request
+      this.closeJob(bookWide.id, 'canceled');
+      this.pausedJobs.delete(bookWide.id);
+    }
+
+    const sameChapter = db
+      .prepare("SELECT id, state FROM jobs WHERE book_id=? AND chapter_id=? AND state IN ('running','paused','queued') LIMIT 1")
+      .get(bookId, chapterId) as unknown as { id: string; state: string } | undefined;
+    if (sameChapter) {
+      if (sameChapter.state === 'paused') {
+        // explicit retry of a paused chapter — put it back to work
+        this.pausedJobs.delete(sameChapter.id);
+        db.prepare("UPDATE jobs SET state='running', started_at=?, finished_at=NULL WHERE id=?").run(
+          new Date().toISOString(),
+          sameChapter.id,
+        );
+        this.refreshBookStatus(bookId);
+        this.emit({ type: 'book.update', bookId, status: 'generating' });
+        this.pump();
+        return { jobId: sameChapter.id };
+      }
+      return { error: 'this chapter is already queued for generation' };
+    }
+
+    const running = db
+      .prepare("SELECT COUNT(*) AS n FROM jobs WHERE book_id=? AND state='running'")
+      .get(bookId) as unknown as { n: number };
+    // nothing running for this book → start immediately; otherwise wait in line
+    const state = running.n > 0 ? 'queued' : 'running';
+    const jobId = randomUUID();
+    const now = new Date().toISOString();
+    db.prepare(
+      'INSERT INTO jobs (id, book_id, chapter_id, state, total_chunks, done_chunks, failed_chunks, created_at, started_at) VALUES (?,?,?,?,?,?,?,?,?)',
+    ).run(jobId, bookId, chapterId, state, pending.n, 0, 0, now, state === 'running' ? now : null);
+
+    // failed chunks of this chapter become retryable when its job starts
+    db.prepare("UPDATE chunks SET status='pending', error=NULL WHERE book_id=? AND chapter_id=? AND status='failed'").run(
+      bookId,
+      chapterId,
+    );
+    this.refreshBookStatus(bookId);
+    this.emit({ type: 'book.update', bookId, status: state === 'running' ? 'generating' : 'queued' });
+    this.pump();
+    return { jobId };
+  }
+
+  /** Book-wide generation absorbs any open chapter jobs (queued or running). */
+  private startBookWide(bookId: string): { jobId: string } | { error: string } {
+    const db = getDb();
     const pending = db
       .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND status IN ('pending','failed')")
       .get(bookId) as unknown as { n: number };
     if (pending.n === 0) return { error: 'no pending chunks' };
 
-    let job = db
-      .prepare("SELECT * FROM jobs WHERE book_id=? AND state IN ('running','paused') ORDER BY created_at DESC LIMIT 1")
+    const openBookWide = db
+      .prepare("SELECT id FROM jobs WHERE book_id=? AND chapter_id IS NULL AND state IN ('running','paused','queued') LIMIT 1")
       .get(bookId) as unknown as { id: string } | undefined;
-    if (!job) {
-      const id = randomUUID();
+    if (!openBookWide) {
+      // supersede open chapter jobs — the book-wide scope covers their work
+      const openChapterJobs = db
+        .prepare("SELECT id, started_at FROM jobs WHERE book_id=? AND chapter_id IS NOT NULL AND state IN ('running','paused','queued')")
+        .all(bookId) as unknown as Array<{ id: string; started_at: string | null }>;
+      for (const j of openChapterJobs) {
+        this.closeJob(j.id, 'canceled');
+        this.pausedJobs.delete(j.id);
+      }
+    }
+
+    let jobId: string;
+    if (openBookWide) {
+      jobId = openBookWide.id;
+      this.pausedJobs.delete(jobId);
+      db.prepare(
+        `UPDATE jobs SET state='running', started_at=COALESCE(started_at, ?), finished_at=NULL WHERE id=?`,
+      ).run(new Date().toISOString(), jobId);
+    } else {
+      jobId = randomUUID();
       const now = new Date().toISOString();
       db.prepare(
-        'INSERT INTO jobs (id, book_id, state, total_chunks, done_chunks, failed_chunks, created_at, started_at) VALUES (?,?,?,?,?,?,?,?)',
-      ).run(id, bookId, 'running', pending.n, 0, 0, now, now);
-      job = { id };
-    } else {
-      // close any stale open segment (e.g. after a crash), then open a fresh one
-      db.prepare(
-        `UPDATE jobs SET wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER)
-         WHERE id=? AND started_at IS NOT NULL`,
-      ).run(job.id);
-      db.prepare("UPDATE jobs SET state='running', started_at=?, finished_at=NULL WHERE id=?").run(
-        new Date().toISOString(),
-        job.id,
-      );
+        'INSERT INTO jobs (id, book_id, chapter_id, state, total_chunks, done_chunks, failed_chunks, created_at, started_at) VALUES (?,?,?,?,?,?,?,?,?)',
+      ).run(jobId, bookId, null, 'running', pending.n, 0, 0, now, now);
     }
-    this.pausedJobs.delete(job.id);
-    db.prepare("UPDATE books SET status='generating', updated_at=? WHERE id=?").run(new Date().toISOString(), bookId);
     // failed chunks from a previous run become retryable when the job restarts
     db.prepare("UPDATE chunks SET status='pending', error=NULL WHERE book_id=? AND status='failed'").run(bookId);
+    db.prepare("UPDATE books SET status='generating', updated_at=? WHERE id=?").run(new Date().toISOString(), bookId);
     this.emit({ type: 'book.update', bookId, status: 'generating' });
     this.pump();
-    return { jobId: job.id };
+    return { jobId };
+  }
+
+  /** Close a job row with wall-time accounting. */
+  private closeJob(jobId: string, state: 'canceled' | 'done' | 'paused'): void {
+    getDb()
+      .prepare(
+        `UPDATE jobs SET state=?, finished_at=?,
+           wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
+           started_at = NULL
+         WHERE id=?`,
+      )
+      .run(state, new Date().toISOString(), jobId);
+  }
+
+  /** Book status follows its jobs: running → generating, queued → queued, else by chunk leftovers. */
+  private refreshBookStatus(bookId: string): 'generating' | 'queued' | 'paused' | 'done' {
+    const db = getDb();
+    const counts = db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM jobs WHERE book_id=? AND state='running') AS running,
+           (SELECT COUNT(*) FROM jobs WHERE book_id=? AND state='queued') AS queued,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status IN ('pending','generating')) AS pending,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status='failed') AS failed`,
+      )
+      .get(bookId, bookId, bookId, bookId) as unknown as {
+      running: number;
+      queued: number;
+      pending: number;
+      failed: number;
+    };
+    const status =
+      counts.running > 0
+        ? 'generating'
+        : counts.queued > 0
+          ? 'queued'
+          : counts.pending > 0 || counts.failed > 0
+            ? 'paused'
+            : 'done';
+    db.prepare("UPDATE books SET status=?, updated_at=? WHERE id=?").run(status, new Date().toISOString(), bookId);
+    return status;
   }
 
   pauseBook(bookId: string): void {
     const db = getDb();
-    const job = db
-      .prepare("SELECT id FROM jobs WHERE book_id=? AND state='running'")
-      .get(bookId) as unknown as { id: string } | undefined;
-    if (job) {
-      this.pausedJobs.add(job.id);
+    // stop the running job AND everything waiting in the chapter queue
+    const openJobs = db
+      .prepare("SELECT id, state, started_at FROM jobs WHERE book_id=? AND state IN ('running','queued')")
+      .all(bookId) as unknown as Array<{ id: string; state: string; started_at: string | null }>;
+    for (const j of openJobs) {
+      if (j.state === 'running') this.pausedJobs.add(j.id);
       db.prepare(
         `UPDATE jobs SET state='paused',
            wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
            started_at = NULL
          WHERE id=?`,
-      ).run(job.id);
+      ).run(j.id);
     }
     db.prepare("UPDATE books SET status='paused', updated_at=? WHERE id=?").run(new Date().toISOString(), bookId);
     this.emit({ type: 'book.update', bookId, status: 'paused' });
@@ -111,18 +237,12 @@ export class TtsQueue {
 
   cancelBook(bookId: string): void {
     const db = getDb();
-    const job = db
-      .prepare("SELECT id FROM jobs WHERE book_id=? AND state IN ('running','paused')")
-      .get(bookId) as unknown as { id: string } | undefined;
-    if (job) {
-      this.pausedJobs.delete(job.id);
-      db.prepare(
-        `UPDATE jobs SET state='canceled',
-           wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
-           started_at = NULL,
-           finished_at = ?
-         WHERE id=?`,
-      ).run(new Date().toISOString(), job.id);
+    const openJobs = db
+      .prepare("SELECT id, state FROM jobs WHERE book_id=? AND state IN ('running','paused','queued')")
+      .all(bookId) as unknown as Array<{ id: string; state: string }>;
+    for (const j of openJobs) {
+      this.pausedJobs.delete(j.id);
+      this.closeJob(j.id, 'canceled');
     }
     // abort in-flight synthesis requests for this book's generating chunks,
     // then reset them so the aborted runner sees 'pending' and stays quiet
@@ -131,11 +251,7 @@ export class TtsQueue {
       .all(bookId) as unknown as Array<{ id: string }>;
     for (const g of generating) this.aborters.get(g.id)?.abort();
     db.prepare("UPDATE chunks SET status='pending', error=NULL WHERE book_id=? AND status='generating'").run(bookId);
-    const remaining = db
-      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND status='pending'")
-      .get(bookId) as unknown as { n: number };
-    const status = remaining.n > 0 ? 'paused' : 'done';
-    db.prepare("UPDATE books SET status=?, updated_at=? WHERE id=?").run(status, new Date().toISOString(), bookId);
+    const status = this.refreshBookStatus(bookId);
     this.emit({ type: 'book.update', bookId, status });
     this.emitJobUpdate(bookId);
   }
@@ -221,21 +337,56 @@ export class TtsQueue {
 
   private claimNextChunk(): { chunk: ChunkRow; jobId: string } | null {
     const db = getDb();
+    // FIFO promotion: the oldest queued chapter whose book has nothing
+    // running takes the worker next (called on every pump, so promotion
+    // cascades naturally as jobs finish)
+    const promotable = db
+      .prepare(
+        `SELECT j.id FROM jobs j
+         WHERE j.state='queued'
+           AND NOT EXISTS (SELECT 1 FROM jobs r WHERE r.book_id=j.book_id AND r.state='running')
+         ORDER BY j.created_at ASC LIMIT 1`,
+      )
+      .get() as unknown as { id: string } | undefined;
+    if (promotable) {
+      const job = db.prepare('SELECT book_id FROM jobs WHERE id=?').get(promotable.id) as unknown as
+        | { book_id: string }
+        | undefined;
+      db.prepare("UPDATE jobs SET state='running', started_at=? WHERE id=?").run(new Date().toISOString(), promotable.id);
+      if (job) {
+        db.prepare("UPDATE books SET status='generating', updated_at=? WHERE id=?").run(
+          new Date().toISOString(),
+          job.book_id,
+        );
+        this.emit({ type: 'book.update', bookId: job.book_id, status: 'generating' });
+        this.emitJobUpdate(job.book_id);
+      }
+    }
+
     const jobs = db
-      .prepare("SELECT id, book_id FROM jobs WHERE state='running' ORDER BY created_at ASC")
-      .all() as unknown as Array<{ id: string; book_id: string }>;
+      .prepare("SELECT id, book_id, chapter_id FROM jobs WHERE state='running' ORDER BY created_at ASC")
+      .all() as unknown as Array<{ id: string; book_id: string; chapter_id: string | null }>;
     for (const job of jobs) {
       if (this.pausedJobs.has(job.id)) continue;
-      const chunk = db
-        .prepare(
-          `SELECT * FROM chunks
-           WHERE book_id=? AND status='pending'
-           ORDER BY (SELECT idx FROM chapters WHERE id=chunks.chapter_id) ASC, idx ASC
-           LIMIT 1`,
-        )
-        .get(job.book_id) as unknown as ChunkRow | undefined;
+      const chunk = job.chapter_id
+        ? (db
+            .prepare(
+              `SELECT * FROM chunks
+               WHERE book_id=? AND chapter_id=? AND status='pending'
+               ORDER BY (SELECT idx FROM chapters WHERE id=chunks.chapter_id) ASC, idx ASC
+               LIMIT 1`,
+            )
+            .get(job.book_id, job.chapter_id) as unknown as ChunkRow | undefined)
+        : (db
+            .prepare(
+              `SELECT * FROM chunks
+               WHERE book_id=? AND status='pending'
+               ORDER BY (SELECT idx FROM chapters WHERE id=chunks.chapter_id) ASC, idx ASC
+               LIMIT 1`,
+            )
+            .get(job.book_id) as unknown as ChunkRow | undefined);
       if (!chunk) {
-        // book exhausted → close its job and move on to the next one
+        // scope exhausted → close its job and move on to the next one
         this.finishJobIfComplete(job.book_id, job.id);
         continue;
       }
@@ -383,47 +534,48 @@ export class TtsQueue {
 
   private finishJobIfComplete(bookId: string, jobId: string): void {
     const db = getDb();
+    const job = db
+      .prepare('SELECT state, chapter_id FROM jobs WHERE id=?')
+      .get(jobId) as unknown as { state: string; chapter_id: string | null } | undefined;
+    if (!job || job.state === 'canceled' || job.state === 'done') return;
+    // "complete" means the job's own scope is exhausted — remaining chapters
+    // keep the book paused/queued via refreshBookStatus
+    const scopeFilter = job.chapter_id ? 'AND chapter_id=?' : '';
+    const scopeArgs = job.chapter_id ? [bookId, job.chapter_id] : [bookId];
     const counts = db
       .prepare(
         `SELECT
-           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status IN ('pending','generating')) AS pending,
-           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status='failed') AS failed`,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? ${scopeFilter} AND status IN ('pending','generating')) AS pending,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? ${scopeFilter} AND status='failed') AS failed`,
       )
-      .get(bookId, bookId) as unknown as { pending: number; failed: number };
+      .get(...scopeArgs) as unknown as { pending: number; failed: number };
     if (counts.pending > 0) return;
-    const job = db.prepare('SELECT state FROM jobs WHERE id=?').get(jobId) as unknown as { state: string } | undefined;
-    if (!job || job.state === 'canceled' || job.state === 'done') return;
-    db.prepare(
-      `UPDATE jobs SET state='done', finished_at=?,
-         wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
-         started_at = NULL
-       WHERE id=?`,
-    ).run(new Date().toISOString(), jobId);
-    // a book with failed chunks is not "done" — pause it so the user can retry
-    const status = counts.failed > 0 ? 'paused' : 'done';
-    db.prepare("UPDATE books SET status=?, updated_at=? WHERE id=?").run(status, new Date().toISOString(), bookId);
+    this.closeJob(jobId, 'done');
+    const status = this.refreshBookStatus(bookId);
     this.emit({ type: 'job.update', bookId, jobId, state: 'done', done: 0, total: 0, failed: 0 });
     this.emit({ type: 'book.update', bookId, status });
   }
 
   private emitJobUpdate(bookId: string): void {
     const db = getDb();
+    // scope the progress readout to the newest job's chapter (book-wide for NULL)
     const job = db
       .prepare(
-        `SELECT id, state,
-           (SELECT COUNT(*) FROM chunks WHERE book_id=jobs.book_id) AS total,
-           (SELECT COUNT(*) FROM chunks WHERE book_id=jobs.book_id AND status='done') AS done,
-           (SELECT COUNT(*) FROM chunks WHERE book_id=jobs.book_id AND status='failed') AS failed
+        `SELECT id, state, chapter_id,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=jobs.book_id AND (jobs.chapter_id IS NULL OR chapter_id=jobs.chapter_id)) AS total,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=jobs.book_id AND (jobs.chapter_id IS NULL OR chapter_id=jobs.chapter_id) AND status='done') AS done,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=jobs.book_id AND (jobs.chapter_id IS NULL OR chapter_id=jobs.chapter_id) AND status='failed') AS failed
          FROM jobs WHERE book_id=? ORDER BY created_at DESC LIMIT 1`,
       )
       .get(bookId) as
-      | { id: string; state: string; total: number; done: number; failed: number }
+      | { id: string; state: string; chapter_id: string | null; total: number; done: number; failed: number }
       | undefined;
     if (!job) return;
     this.emit({
       type: 'job.update',
       bookId,
       jobId: job.id,
+      chapterId: job.chapter_id ?? undefined,
       state: job.state,
       done: job.done,
       total: job.total,

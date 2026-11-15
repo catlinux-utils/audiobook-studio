@@ -57,7 +57,7 @@ export interface VoiceRow {
 export interface JobRow {
   id: string;
   book_id: string;
-  state: 'running' | 'paused' | 'done' | 'canceled';
+  state: 'queued' | 'running' | 'paused' | 'done' | 'canceled';
   total_chunks: number;
   done_chunks: number;
   failed_chunks: number;
@@ -139,6 +139,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE jobs ADD COLUMN finished_at TEXT;
   ALTER TABLE jobs ADD COLUMN audio_ms INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE jobs ADD COLUMN wall_ms INTEGER NOT NULL DEFAULT 0;
+  `,
+  // 003 — chapter-scoped generation jobs (NULL = whole book)
+  `
+  ALTER TABLE jobs ADD COLUMN chapter_id TEXT;
   `,
 ];
 
