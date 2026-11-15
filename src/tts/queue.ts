@@ -200,7 +200,7 @@ export class TtsQueue {
     let voiceRefBase64: string | undefined;
     let referenceText: string | undefined;
     if (book.voice_id) {
-      const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(book.voice_id) as
+      const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(book.voice_id) as unknown as
         | { wav_path: string; reference_text: string }
         | undefined;
       if (voice) {
@@ -209,16 +209,48 @@ export class TtsQueue {
       }
     }
 
-    const seed = seedOverride ?? book.seed ?? undefined;
-    const wav = await this.client.synthesize({
-      input: chunk.text,
-      voiceRefBase64,
-      referenceText,
-      numInferenceSteps: book.num_inference_steps,
-      guidanceScale: book.guidance_scale,
-      speed: book.speed === 1 ? undefined : book.speed,
-      seed,
-    });
+    // Diffusion samplers occasionally collapse on a specific (seed, steps,
+    // text) combination and return an empty/valid WAV. Retry with a bumped
+    // seed — deterministic per chunk so takes stay reproducible.
+    const baseSeed = Number(seedOverride ?? book.seed ?? '0');
+    const seedForAttempt = (attempt: number): string | undefined => {
+      if (attempt === 0) return seedOverride ?? book.seed ?? undefined;
+      const base = Number.isFinite(baseSeed) && baseSeed > 0 ? baseSeed : 7919 * (chunk.idx + 1);
+      return String((base + attempt * 104729) % 4294967295);
+    };
+
+    const maxAttempts = 4;
+    let wav: Buffer | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const candidate = await this.client.synthesize({
+          input: chunk.text,
+          voiceRefBase64,
+          referenceText,
+          numInferenceSteps: book.num_inference_steps,
+          guidanceScale: book.guidance_scale,
+          speed: book.speed === 1 ? undefined : book.speed,
+          seed: seedForAttempt(attempt),
+        });
+        const info = readWavInfo(candidate);
+        if (info.durationMs < 250) {
+          lastError = new Error(`degenerate synthesis output (empty audio), seed=${seedForAttempt(attempt) ?? 'random'}`);
+          continue;
+        }
+        wav = candidate;
+        break;
+      } catch (err) {
+        lastError = err;
+        // network/parse errors from the client already retried internally;
+        // parse failures on valid-size responses are treated as degenerate too
+        if (err instanceof Error && err.message.includes('WAV data chunk missing')) continue;
+        throw err;
+      }
+    }
+    if (!wav) {
+      throw lastError instanceof Error ? lastError : new Error('synthesis failed');
+    }
 
     const dir = path.join(paths.books, chunk.book_id, 'chunks');
     fs.mkdirSync(dir, { recursive: true });
@@ -270,16 +302,22 @@ export class TtsQueue {
 
   private finishJobIfComplete(bookId: string, jobId: string): void {
     const db = getDb();
-    const remaining = db
-      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND status IN ('pending','generating')")
-      .get(bookId) as unknown as { n: number };
-    if (remaining.n > 0) return;
+    const counts = db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status IN ('pending','generating')) AS pending,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status='failed') AS failed`,
+      )
+      .get(bookId, bookId) as unknown as { pending: number; failed: number };
+    if (counts.pending > 0) return;
     const job = db.prepare('SELECT state FROM jobs WHERE id=?').get(jobId) as unknown as { state: string } | undefined;
     if (!job || job.state === 'canceled' || job.state === 'done') return;
     db.prepare("UPDATE jobs SET state='done' WHERE id=?").run(jobId);
-    db.prepare("UPDATE books SET status='done', updated_at=? WHERE id=?").run(new Date().toISOString(), bookId);
+    // a book with failed chunks is not "done" — pause it so the user can retry
+    const status = counts.failed > 0 ? 'paused' : 'done';
+    db.prepare("UPDATE books SET status=?, updated_at=? WHERE id=?").run(status, new Date().toISOString(), bookId);
     this.emit({ type: 'job.update', bookId, jobId, state: 'done', done: 0, total: 0, failed: 0 });
-    this.emit({ type: 'book.update', bookId, status: 'done' });
+    this.emit({ type: 'book.update', bookId, status });
   }
 
   private emitJobUpdate(bookId: string): void {

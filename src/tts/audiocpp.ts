@@ -128,6 +128,14 @@ export class AudioCppClient {
     }
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length < 44) throw new TtsRequestError(res.status, 'response too short to be a WAV', true);
+    // RIFF-declared total size vs actual bytes: catches truncated responses
+    // (contended servers occasionally cut the body mid-transfer)
+    if (buf.length >= 8) {
+      const declared = buf.readUInt32LE(4) + 8;
+      if (buf.length < declared) {
+        throw new TtsRequestError(res.status, `truncated WAV response: got ${buf.length} of ${declared} bytes`, true);
+      }
+    }
     return buf;
   }
 }
