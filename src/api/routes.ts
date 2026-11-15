@@ -193,6 +193,7 @@ export function registerRoutes(app: FastifyInstance): void {
     ).run(bookId, parsed.title, parsed.author, parsed.language, coverPath, file.filename ?? '', 'draft', s.defaultMaxChunkChars, now, now);
 
     insertChaptersAndChunks(bookId, parsed.chapters, s.defaultMaxChunkChars);
+    bus.emit('event', { type: 'book.update', bookId, status: 'draft' });
     return { id: bookId };
   });
 
@@ -301,6 +302,7 @@ export function registerRoutes(app: FastifyInstance): void {
         return v === null ? null : typeof v === 'number' ? v : String(v);
       });
       db.prepare(`UPDATE books SET ${sets}, updated_at=? WHERE id=?`).run(...values, new Date().toISOString(), id);
+      bus.emit('event', { type: 'book.update', bookId: id, status: 'meta' });
     }
     return getBookPayload(id);
   });
@@ -311,6 +313,7 @@ export function registerRoutes(app: FastifyInstance): void {
     const db = getDb();
     db.prepare('DELETE FROM books WHERE id=?').run(id);
     fs.rmSync(path.join(paths.books, id), { recursive: true, force: true });
+    bus.emit('event', { type: 'book.update', bookId: id, status: 'deleted' });
     return { ok: true };
   });
 
@@ -325,6 +328,7 @@ export function registerRoutes(app: FastifyInstance): void {
       .prepare('UPDATE chapters SET title=? WHERE id=? AND book_id=?')
       .run(title, chapterId, id);
     if (result.changes === 0) return reply.code(404).send({ error: 'chapter not found' });
+    bus.emit('event', { type: 'book.update', bookId: id, status: 'meta' });
     return { id: chapterId, title };
   });
 
@@ -346,7 +350,17 @@ export function registerRoutes(app: FastifyInstance): void {
     const db = getDb();
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(id) as unknown as BookRow | undefined;
     if (!book) return reply.code(404).send({ error: 'book not found' });
-    rechunkBook(id, book.max_chunk_chars);
+    // rechunking deletes all chunk rows — never while a generation job is live
+    const activeJob = db
+      .prepare("SELECT id FROM jobs WHERE book_id=? AND state IN ('running','paused')")
+      .get(id) as unknown as { id: string } | undefined;
+    if (activeJob) return reply.code(409).send({ error: 'generation is active — pause or cancel it before rechunking' });
+    try {
+      rechunkBook(id, book.max_chunk_chars);
+    } catch (err) {
+      return reply.code(500).send({ error: `rechunk failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+    bus.emit('event', { type: 'book.update', bookId: id, status: book.status });
     return getBookPayload(id);
   });
 
@@ -395,6 +409,7 @@ export function registerRoutes(app: FastifyInstance): void {
       db.prepare('INSERT INTO exports (id, book_id, format, path, chapter_count, duration_ms, created_at) VALUES (?,?,?,?,?,?,?)').run(
         record.id, record.book_id, record.format, record.path, record.chapter_count, record.duration_ms, record.created_at,
       );
+      bus.emit('event', { type: 'book.update', bookId: id, status: book.status });
       return { export: record };
     } catch (err) {
       return reply.code(500).send({ error: `export failed: ${err instanceof Error ? err.message : String(err)}` });
@@ -404,6 +419,19 @@ export function registerRoutes(app: FastifyInstance): void {
   app.get('/api/books/:id/exports', async (req) => {
     const { id } = req.params as { id: string };
     return getDb().prepare('SELECT id, format, path, chapter_count, duration_ms, created_at FROM exports WHERE book_id=? ORDER BY created_at DESC').all(id);
+  });
+
+  app.get('/api/exports/:id/download', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const record = getDb().prepare('SELECT * FROM exports WHERE id=?').get(id) as unknown as
+      | { path: string; format: string }
+      | undefined;
+    if (!record || !fs.existsSync(record.path)) return reply.code(404).send({ error: 'export not found' });
+    const name = path.basename(record.path);
+    return reply
+      .type(record.format === 'm4b' ? 'audio/mp4' : 'audio/mpeg')
+      .header('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
+      .send(fs.createReadStream(record.path));
   });
 
   // ---------- QA spot-check ----------
@@ -723,7 +751,12 @@ function rechunkBook(bookId: string, maxChunkChars: number): void {
   const db = getDb();
   // re-chunk from the stored source file so offsets stay honest
   const book = db.prepare('SELECT * FROM books WHERE id=?').get(bookId) as unknown as BookRow;
-  const sourcePath = path.join(paths.books, bookId, fs.readdirSync(path.join(paths.books, bookId)).find((f) => f.startsWith('source')) ?? '');
+  const bookDir = path.join(paths.books, bookId);
+  const sourceName = fs
+    .readdirSync(bookDir, { withFileTypes: true })
+    .find((e) => e.isFile() && e.name.startsWith('source'));
+  if (!sourceName) throw new Error('source file missing — re-ingest the book');
+  const sourcePath = path.join(bookDir, sourceName.name);
   const raw = fs.readFileSync(sourcePath);
   let chapters: Array<{ title: string; text: string }>;
   if (sourcePath.endsWith('.epub')) {

@@ -156,7 +156,8 @@ export const api = {
     req<{ id: string; title: string }>('PATCH', `/api/books/${bookId}/chapters/${chapterId}`, { title }),
   qaRandom: (id: string) => req<QaSample>('POST', `/api/books/${id}/qa/random`),
   exportBook: (id: string) => req<{ export: { path: string; duration_ms: number; chapter_count: number } }>('POST', `/api/books/${id}/export`),
-  listExports: (id: string) => req<Array<{ id: string; path: string; duration_ms: number; created_at: string }>>('GET', `/api/books/${id}/exports`),
+  listExports: (id: string) =>
+    req<Array<{ id: string; path: string; chapter_count: number; duration_ms: number; created_at: string }>>('GET', `/api/books/${id}/exports`),
 
   regenerateChunk: (id: string, seed?: string) =>
     req<{ ok: boolean }>('POST', `/api/chunks/${id}/regenerate`, seed ? { seed } : {}),

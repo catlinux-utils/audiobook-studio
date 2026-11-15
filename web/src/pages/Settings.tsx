@@ -10,7 +10,10 @@ export default function Settings() {
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch((e) => setError(String(e.message ?? e)));
-    api.health().then(setHealth).catch((e) => setHealth({ ok: false, error: String(e.message ?? e) }));
+    const poll = () => api.health().then(setHealth).catch((e) => setHealth({ ok: false, error: String(e.message ?? e) }));
+    poll();
+    const interval = setInterval(poll, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   const save = async () => {

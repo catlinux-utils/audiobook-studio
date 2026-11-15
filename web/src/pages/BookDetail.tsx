@@ -17,6 +17,7 @@ export default function BookDetail() {
   const [editAuthor, setEditAuthor] = useState('');
   const [editingChapterId, setEditingChapterId] = useState<string | null>(null);
   const [editChapterTitle, setEditChapterTitle] = useState('');
+  const [exports, setExports] = useState<Array<{ id: string; path: string; duration_ms: number; chapter_count: number; created_at: string }>>([]);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const refreshBook = useCallback(() => {
@@ -34,8 +35,12 @@ export default function BookDetail() {
   useEffect(() => {
     refreshBook();
     api.listVoices().then(setVoices).catch(() => setVoices([]));
+    api.listExports(id).then(setExports).catch(() => setExports([]));
     const off = onStudioEvent((ev) => {
-      if (ev.type === 'book.update' || ev.type === 'job.update') refreshBook();
+      if (ev.type === 'book.update' || ev.type === 'job.update') {
+        refreshBook();
+        api.listExports(id).then(setExports).catch(() => undefined);
+      }
       if (ev.type === 'chunk.update' && (ev.bookId === id || ev.chapterId === chapterId)) {
         refreshChapter();
         refreshBook();
@@ -206,6 +211,29 @@ export default function BookDetail() {
             <Button onClick={() => playUrl(api.audioUrl.chunk(qa.id))}>▶ play sample</Button>
             {qa.prevChunkId && <Button variant="ghost" onClick={() => playUrl(api.audioUrl.chunk(qa.prevChunkId!))}>◀ prev chunk</Button>}
             {qa.nextChunkId && <Button variant="ghost" onClick={() => playUrl(api.audioUrl.chunk(qa.nextChunkId!))}>next chunk ▶</Button>}
+          </div>
+        </div>
+      )}
+
+      {/* ---- exports ---- */}
+      {exports.length > 0 && (
+        <div className="mb-6 rounded-xl bg-zinc-900 border border-zinc-800 p-4">
+          <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-3">Exported audiobooks</h2>
+          <div className="space-y-2">
+            {exports.map((x) => (
+              <div key={x.id} className="flex items-center gap-3 text-sm">
+                <span className="font-medium">📕 {x.path.split(/[\\/]/).pop()}</span>
+                <span className="text-xs text-zinc-500">
+                  {x.chapter_count} chapter(s) · {formatDuration(x.duration_ms)} · {new Date(x.created_at).toLocaleString()}
+                </span>
+                <a
+                  href={`/api/exports/${x.id}/download`}
+                  className="ml-auto text-emerald-400 hover:underline"
+                >
+                  ⬇ download
+                </a>
+              </div>
+            ))}
           </div>
         </div>
       )}

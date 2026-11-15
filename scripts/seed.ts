@@ -31,6 +31,10 @@ function insertBook(file: string): void {
   }
   const maxChunkChars = loadSettings().defaultMaxChunkChars;
   const bookId = randomUUID();
+  const bookDir = path.join(paths.books, bookId);
+  fs.mkdirSync(bookDir, { recursive: true });
+  // persist the source file so rechunk works later (same as the API ingest path)
+  fs.copyFileSync(file, path.join(bookDir, 'source' + path.extname(file)));
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO books (id, title, author, language, cover_path, source_file, status, max_chunk_chars, created_at, updated_at)
