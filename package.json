@@ -5,7 +5,7 @@
   "description": "Self-hosted ebook-to-audiobook studio wrapping a local audio.cpp (Vulkan) TTS server",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
