@@ -37,6 +37,14 @@ export type AppSettings = {
   defaultMaxChunkChars: number;
   /** Server port for this app. */
   port: number;
+  /** Smooth chunk joins during assembly (edge trim + loudness match + fades + pauses). */
+  assemblySmooth: boolean;
+  /** Inserted pause between chunks at sentence boundaries (ms). */
+  assemblyGapMs: number;
+  /** Inserted pause at paragraph boundaries (ms). */
+  assemblyParagraphGapMs: number;
+  /** Inserted pause at mid-sentence (soft cut) chunk boundaries (ms). */
+  assemblySoftCutGapMs: number;
 };
 
 const defaults: AppSettings = {
@@ -48,6 +56,10 @@ const defaults: AppSettings = {
   ffmpegPath: 'ffmpeg',
   defaultMaxChunkChars: 280,
   port: 8090,
+  assemblySmooth: true,
+  assemblyGapMs: 400,
+  assemblyParagraphGapMs: 700,
+  assemblySoftCutGapMs: 120,
 };
 
 export const paths = {
@@ -59,6 +71,7 @@ export const paths = {
   exports: path.join(root, 'data', 'exports'),
   runtime: path.join(root, 'runtime'),
   db: path.join(root, 'data', 'studio.db'),
+  serverLog: path.join(root, 'data', 'server.log'),
 };
 
 export function ensureDirs(): void {

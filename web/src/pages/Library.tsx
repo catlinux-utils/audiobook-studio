@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, onStudioEvent, type Book, type Voice } from '../lib/api';
-import { Button, ProgressBar, StatusBadge, formatDuration } from '../components/bits';
+import { Banner, Button, Card, Checkbox, Input, ProgressBar, Select, StatusBadge, Textarea, formatDuration } from '../components/bits';
 
 export default function Library() {
   const [books, setBooks] = useState<Book[]>([]);
@@ -106,33 +106,28 @@ export default function Library() {
         </div>
       </div>
 
-      {error && <div className="mb-4 rounded-lg bg-red-950 border border-red-800 text-red-200 px-4 py-2 text-sm">{error}</div>}
+      {error && <Banner kind="error" className="mb-4">{error}</Banner>}
 
       {pasteOpen && (
-        <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4 mb-6">
-          <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-3">Paste a story or article</h2>
+        <Card title="Paste a story or article" className="mb-6">
           <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr_100px_1fr] gap-3 mb-3">
-            <input
-              className="rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm"
+            <Input
               value={pTitle}
               onChange={(e) => setPTitle(e.target.value)}
               placeholder="Title (empty = first line of the text)"
             />
-            <input
-              className="rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm"
+            <Input
               value={pAuthor}
               onChange={(e) => setPAuthor(e.target.value)}
               placeholder="Author (optional)"
             />
-            <input
-              className="rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm"
+            <Input
               value={pLanguage}
               onChange={(e) => setPLanguage(e.target.value)}
               placeholder="lang"
               title="synthesis language hint, e.g. pl"
             />
-            <select
-              className="rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm"
+            <Select
               value={pVoice}
               onChange={(e) => setPVoice(e.target.value)}
               title="voice for generation"
@@ -141,10 +136,10 @@ export default function Library() {
               {voices.map((v) => (
                 <option key={v.id} value={v.id}>{v.name}</option>
               ))}
-            </select>
+            </Select>
           </div>
-          <textarea
-            className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm min-h-[220px]"
+          <Textarea
+            className="w-full min-h-[220px]"
             value={pText}
             onChange={(e) => setPText(e.target.value)}
             placeholder="Paste the story or article here… paragraphs are kept, it gets chunked like a book."
@@ -161,7 +156,7 @@ export default function Library() {
             </Button>
             <span className="text-xs text-zinc-500">up to ~200k characters · same pipeline as books: chunks, queue, QA, exports</span>
           </div>
-        </div>
+        </Card>
       )}
 
       {books.length === 0 ? (
@@ -176,19 +171,19 @@ export default function Library() {
               className="rounded-xl bg-zinc-900 border border-zinc-800 hover:border-zinc-600 transition-colors cursor-pointer overflow-hidden flex"
               onClick={() => navigate(`/books/${b.id}`)}
             >
-              <div className="w-20 shrink-0 bg-zinc-800">
+              <div className="w-20 shrink-0 bg-zinc-800 relative">
                 {b.cover_path ? (
                   <img
                     src={`/api/books/${b.id}/cover`}
                     alt=""
                     className="w-full h-full object-cover"
                     onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).style.display = 'none';
-                      e.currentTarget.parentElement!.innerHTML = '<div class="w-full h-full flex items-center justify-center text-3xl">📖</div>';
+                      // broken cover file on disk — hide it, the 📖 fallback shows through the parent
+                      (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
                     }}
                   />
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center text-3xl">📖</div>
+                  <div className="absolute inset-0 flex items-center justify-center text-3xl">📖</div>
                 )}
               </div>
               <div className="p-3 flex-1 min-w-0">

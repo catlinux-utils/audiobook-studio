@@ -29,6 +29,8 @@ export interface ChapterRow {
   idx: number;
   title: string;
   char_count: number;
+  /** per-chapter chunk size override (chars); null = book default */
+  max_chunk_chars: number | null;
 }
 
 export interface ChunkRow {
@@ -55,6 +57,8 @@ export interface VoiceRow {
   reference_text: string;
   /** JSON-encoded expert synthesis options (see tts/voiceOptions.ts). */
   synth_options: string | null;
+  /** per-voice standard pause target in ms (assembly pacing); null = global default */
+  pause_target_ms: number | null;
   created_at: string;
 }
 
@@ -188,6 +192,18 @@ const MIGRATIONS: string[] = [
     qa_json TEXT
   );
   CREATE INDEX idx_voice_takes_voice ON voice_takes(voice_id, created_at);
+  `,
+  // 007 — per-chunk disable flag: excluded from queueing and exports
+  `
+  ALTER TABLE chunks ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;
+  `,
+  // 008 — per-voice standard pause target (assembly pacing); null = global default
+  `
+  ALTER TABLE voices ADD COLUMN pause_target_ms INTEGER;
+  `,
+  // 009 — per-chapter chunk size override; null = book default
+  `
+  ALTER TABLE chapters ADD COLUMN max_chunk_chars INTEGER;
   `,
 ];
 

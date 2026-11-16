@@ -12,7 +12,7 @@ import {
 } from '../lib/api';
 import { EXPERT_OPTIONS, type ExpertOptionDef } from '../lib/expertOptions';
 import AlignPanel from '../components/AlignPanel';
-import { Button, formatDuration } from '../components/bits';
+import { Banner, Button, Card, Checkbox, Input, ProgressBar, SectionTitle, Select, Textarea, WordChip, formatDuration } from '../components/bits';
 
 const DEFAULT_TEST_TEXT =
   'O żywocie ludzkim. Fraszki to wszytko, cokolwiek myślemy, fraszki to wszytko, cokolwiek czyniemy. Zacność, uroda, moc, pieniądze, sława, wszystko to minie jako polna trawa.';
@@ -124,7 +124,7 @@ export default function VoiceExpert() {
   // reference-cleanup state
   const [clean, setClean] = useState({
     start: '', end: '', highpassHz: '', lowpassHz: '', denoiseStrength: '',
-    gainDb: '', fadeInSec: '', fadeOutSec: '',
+    gainDb: '', fadeInSec: '', fadeOutSec: '', shortenPauses: '',
     loudnorm: false, compressor: false, trimSilence: true,
   });
   const [cleanPreview, setCleanPreview] = useState<{ url: string; durationMs: number; sizeBytes: number } | null>(null);
@@ -349,6 +349,7 @@ export default function VoiceExpert() {
     gainDb: clean.gainDb.trim() !== '' ? Number(clean.gainDb) : 0,
     fadeInSec: clean.fadeInSec.trim() !== '' ? Number(clean.fadeInSec) : 0,
     fadeOutSec: clean.fadeOutSec.trim() !== '' ? Number(clean.fadeOutSec) : 0,
+    shortenPauses: clean.shortenPauses.trim() !== '' ? Number(clean.shortenPauses) : 0,
     loudnorm: clean.loudnorm,
     compressor: clean.compressor,
     trimSilence: clean.trimSilence,
@@ -473,17 +474,24 @@ export default function VoiceExpert() {
 
   const applied: ExpertOptions = voice?.synth_options ?? {};
 
+  const copyOptionsJson = () => {
+    void navigator.clipboard.writeText(JSON.stringify(applied, null, 2)).then(
+      () => setNotice('options JSON copied to the clipboard'),
+      () => setError('clipboard write failed — select the chips manually'),
+    );
+  };
+
   return (
     <div className="space-y-6">
       {/* ---------- header ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
+      <Card>
         <div className="flex flex-wrap items-center gap-3">
           <Link to="/voices" className="text-sm text-zinc-400 hover:text-zinc-200">← Voices</Link>
           <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wide">🧪 Expert mode</span>
         </div>
         <div className="flex flex-wrap items-center gap-3 mt-3">
-          <input
-            className="rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-lg font-medium"
+          <Input
+            className="text-lg font-medium max-w-[320px]"
             value={name}
             onChange={(e) => setName(e.target.value)}
             onBlur={saveName}
@@ -508,23 +516,25 @@ export default function VoiceExpert() {
             ))
           )}
           {Object.keys(applied).length > 0 && (
+            <Button variant="link" size="sm" onClick={copyOptionsJson} title="copy the applied options as JSON">copy JSON</Button>
+          )}
+          {Object.keys(applied).length > 0 && (
             <Button variant="ghost" onClick={resetApplied} title="back to server defaults in generation">reset all</Button>
           )}
         </div>
-      </div>
+      </Card>
 
-      {error && <div className="rounded-lg bg-red-950 border border-red-800 text-red-200 px-4 py-2 text-sm">{error}</div>}
-      {notice && <div className="rounded-lg bg-emerald-950 border border-emerald-800 text-emerald-200 px-4 py-2 text-sm">{notice}</div>}
+      {error && <Banner kind="error">{error}</Banner>}
+      {notice && <Banner kind="success">{notice}</Banner>}
 
       {/* ---------- transcript & alignment ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-3">Reference transcript</h2>
+      <Card title="Reference transcript">
         <AlignPanel voiceId={id} transcript={transcript} onTranscriptChange={setTranscript} onSaved={refreshVoice} onError={setError} />
-      </div>
+      </Card>
 
       {/* ---------- reference cleanup ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-1">Reference cleanup</h2>
+      <Card>
+        <SectionTitle className="mb-1">Reference cleanup</SectionTitle>
         <p className="text-xs text-zinc-500 mb-3">
           Adjust the provided voice file before it reaches the cloner: cut, filters, noise reduction, loudness, fades.
           Preview first — nothing is saved until you save it.
@@ -538,18 +548,19 @@ export default function VoiceExpert() {
           <CleanField label="gain (dB)" value={clean.gainDb} onChange={(v) => setClean({ ...clean, gainDb: v })} placeholder="0" />
           <CleanField label="fade in (s)" value={clean.fadeInSec} onChange={(v) => setClean({ ...clean, fadeInSec: v })} placeholder="0" />
           <CleanField label="fade out (s)" value={clean.fadeOutSec} onChange={(v) => setClean({ ...clean, fadeOutSec: v })} placeholder="0" />
+          <CleanField label="max pause (s)" value={clean.shortenPauses} onChange={(v) => setClean({ ...clean, shortenPauses: v })} placeholder="compress pauses, e.g. 0.3" />
         </div>
         <div className="flex flex-wrap items-center gap-4 mt-3 text-sm">
           <label className="flex items-center gap-1.5 text-zinc-300">
-            <input type="checkbox" checked={clean.loudnorm} onChange={(e) => setClean({ ...clean, loudnorm: e.target.checked })} />
+            <Checkbox checked={clean.loudnorm} onChange={(e) => setClean({ ...clean, loudnorm: e.target.checked })} />
             loudness normalize (-20 LUFS)
           </label>
           <label className="flex items-center gap-1.5 text-zinc-300">
-            <input type="checkbox" checked={clean.compressor} onChange={(e) => setClean({ ...clean, compressor: e.target.checked })} />
+            <Checkbox checked={clean.compressor} onChange={(e) => setClean({ ...clean, compressor: e.target.checked })} />
             compressor
           </label>
           <label className="flex items-center gap-1.5 text-zinc-300">
-            <input type="checkbox" checked={clean.trimSilence} onChange={(e) => setClean({ ...clean, trimSilence: e.target.checked })} />
+            <Checkbox checked={clean.trimSilence} onChange={(e) => setClean({ ...clean, trimSilence: e.target.checked })} />
             trim edge silence
           </label>
           <Button onClick={runCleanPreview} disabled={busy !== ''}>
@@ -598,8 +609,9 @@ export default function VoiceExpert() {
               <Button variant="primary" onClick={saveCleanAsReference} disabled={busy !== ''}>
                 {busy === 'clean-save' ? 'saving…' : '💾 save as reference'}
               </Button>
-              <input
-                className="rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs w-44"
+              <Input
+                size="sm"
+                className="w-44"
                 placeholder="new voice name…"
                 value={cleanAsName}
                 onChange={(e) => setCleanAsName(e.target.value)}
@@ -613,11 +625,11 @@ export default function VoiceExpert() {
             </div>
           </div>
         )}
-      </div>
+      </Card>
 
       {/* ---------- parameter bench ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-1">Parameter bench</h2>
+      <Card>
+        <SectionTitle className="mb-1">Parameter bench</SectionTitle>
         <p className="text-xs text-zinc-500 mb-3">
           Full OmniVoice option surface. Empty = server default. Options marked <span className="rounded bg-zinc-800 border border-zinc-700 px-1">book wins</span> are
           overridden by per-book steps/guidance/speed during generation, but you can still test them here.
@@ -642,30 +654,33 @@ export default function VoiceExpert() {
             setDraft={setDraft}
           />
         </div>
-      </div>
+      </Card>
 
       {/* ---------- test bench ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-1">Test bench</h2>
+      <Card>
+        <SectionTitle className="mb-1">Test bench</SectionTitle>
         <p className="text-xs text-zinc-500 mb-3">
           Synthesizes one sentence with the bench options above, transcribes it back and scores every word.
           Each take ≈ 20–40 s of GPU and is saved to the takes table.
         </p>
         <div className="flex flex-wrap items-center gap-2 mb-2">
-          <input
-            className="flex-1 min-w-[240px] rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs"
+          <Input
+            size="sm"
+            className="flex-1 min-w-[240px]"
             value={testText}
             onChange={(e) => setTestText(e.target.value)}
             title="sentence the clone must say"
           />
-          <input
-            className="w-16 rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs"
+          <Input
+            size="sm"
+            className="w-16"
             value={language}
             onChange={(e) => setLanguage(e.target.value)}
             title="language hint (synthesis + ASR)"
           />
-          <input
-            className="w-24 rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs"
+          <Input
+            size="sm"
+            className="w-24"
             value={seed}
             onChange={(e) => setSeed(e.target.value)}
             placeholder="seed (rand)"
@@ -680,15 +695,15 @@ export default function VoiceExpert() {
             <div className="text-zinc-500">{optionsSummary(lastRun.result.options)}</div>
             <QaLine qa={lastRun.result.qa} durationMs={lastRun.result.duration_ms} />
             <div>
-              <button className="text-sky-400 hover:underline" onClick={() => void new Audio(lastRun.url).play()}>▶ hear the take</button>
+              <Button variant="link" size="sm" className="text-sky-400" onClick={() => void new Audio(lastRun.url).play()}>▶ hear the take</Button>
             </div>
           </div>
         )}
-      </div>
+      </Card>
 
       {/* ---------- clone doctor ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-1">🩺 Clone doctor</h2>
+      <Card>
+        <SectionTitle className="mb-1">🩺 Clone doctor</SectionTitle>
         <p className="text-xs text-zinc-500 mb-3">
           One click: tries a curated sequence of fixes on top of your bench options (same sentence + one fixed seed),
           stops early on a perfect take, and applies the winner automatically. Up to {DOCTOR_VARIANTS.length} takes ≈ 2 min of GPU.
@@ -698,13 +713,13 @@ export default function VoiceExpert() {
             {doctorRunning ? (doctorProgress ? `trying: ${doctorProgress.label} (${doctorProgress.idx + 1}/${doctorProgress.total})` : 'diagnosing…') : '🩺 diagnose & fix'}
           </Button>
           <label className="flex items-center gap-1.5 text-sm text-zinc-300">
-            <input type="checkbox" checked={doctorAutoApply} onChange={(e) => setDoctorAutoApply(e.target.checked)} />
+            <Checkbox checked={doctorAutoApply} onChange={(e) => setDoctorAutoApply(e.target.checked)} />
             apply the winner automatically
           </label>
         </div>
         {doctorRunning && doctorProgress && (
-          <div className="mt-3 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-            <div className="h-full bg-emerald-600 transition-all" style={{ width: `${(doctorProgress.idx / doctorProgress.total) * 100}%` }} />
+          <div className="mt-3">
+            <ProgressBar done={doctorProgress.idx + 1} total={doctorProgress.total} />
           </div>
         )}
         {doctorResults.length > 0 && (
@@ -727,19 +742,18 @@ export default function VoiceExpert() {
                     <span className="text-red-400 text-xs">missing: {r.result.qa.missing.join(', ')}</span>
                   )}
                   <span className="text-zinc-600 text-xs">{(r.result.duration_ms / 1000).toFixed(1)}s</span>
-                  <button className="text-emerald-400 hover:underline text-xs ml-auto" onClick={() => void applyTake({ options: r.options })}>
+                  <Button variant="link" size="sm" className="text-emerald-400 ml-auto" onClick={() => void applyTake({ options: r.options })}>
                     ★ apply
-                  </button>
+                  </Button>
                 </div>
               );
             })}
           </div>
         )}
-      </div>
+      </Card>
 
       {/* ---------- takes ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-3">Takes ({takes.length})</h2>
+      <Card title={`Takes (${takes.length})`}>
         {takes.length === 0 && <div className="text-sm text-zinc-500">No takes yet — run the test bench or a sweep.</div>}
         {takes.length > 0 && (
           <div className="overflow-x-auto">
@@ -777,24 +791,36 @@ export default function VoiceExpert() {
                         )}
                       </td>
                       <td className="py-2 pr-3">
-                        <button
-                          className="text-sky-400 hover:underline text-xs"
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="text-sky-400"
                           onClick={() => void new Audio(api.audioUrl.take(id, t.id)).play()}
                         >
                           ▶ {(t.duration_ms / 1000).toFixed(1)}s
-                        </button>
+                        </Button>
                       </td>
                       <td className="py-2 pr-3 whitespace-nowrap">
-                        <button
-                          className="text-emerald-400 hover:underline text-xs mr-3"
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="text-emerald-400 mr-3"
                           title="save these options to the voice — generation will use them"
                           onClick={() => void applyTake(t)}
                         >
                           ★ apply
-                        </button>
-                        <button className="text-zinc-500 hover:text-red-400 text-xs" onClick={() => void deleteTake(t.id)}>
+                        </Button>
+                        <Button
+                          variant="link"
+                          size="sm"
+                          title="delete this take"
+                          onClick={() => {
+                            if (!window.confirm('Delete this take?')) return;
+                            void deleteTake(t.id);
+                          }}
+                        >
                           🗑
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   );
@@ -803,18 +829,17 @@ export default function VoiceExpert() {
             </table>
           </div>
         )}
-      </div>
+      </Card>
 
       {/* ---------- sweep builder ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-1">Sweep builder</h2>
+      <Card>
+        <SectionTitle className="mb-1">Sweep builder</SectionTitle>
         <p className="text-xs text-zinc-500 mb-3">
           Try one parameter over several values with the same sentence. Takes are saved and ranked by WER —
           runs sequentially, each value ≈ 20–40 s of GPU.
         </p>
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            className="rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-sm"
+          <Select
             value={sweepParam}
             onChange={(e) => setSweepParam(e.target.value)}
           >
@@ -822,10 +847,10 @@ export default function VoiceExpert() {
             {EXPERT_OPTIONS.filter((o) => o.type !== 'string').map((o) => (
               <option key={o.name} value={o.name}>{o.label} ({o.name})</option>
             ))}
-          </select>
+          </Select>
           <span className="text-zinc-500 text-sm">=</span>
-          <input
-            className="flex-1 min-w-[200px] rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-sm"
+          <Input
+            className="flex-1 min-w-[200px]"
             value={sweepValues}
             onChange={(e) => setSweepValues(e.target.value)}
             placeholder={sweepParam === '__seed' ? 'e.g. 1234, 5678, 90210' : 'comma-separated values, e.g. 2, 2.5, 3'}
@@ -836,17 +861,17 @@ export default function VoiceExpert() {
         </div>
         <div className="flex flex-wrap items-center gap-4 mt-2 text-sm">
           <label className="flex items-center gap-1.5 text-zinc-300" title="stop the sweep as soon as a take says every word perfectly — saves GPU time">
-            <input type="checkbox" checked={sweepEarlyStop} onChange={(e) => setSweepEarlyStop(e.target.checked)} />
+            <Checkbox checked={sweepEarlyStop} onChange={(e) => setSweepEarlyStop(e.target.checked)} />
             stop on perfect take
           </label>
           <label className="flex items-center gap-1.5 text-zinc-300" title="after the sweep, save the lowest-WER value to the voice">
-            <input type="checkbox" checked={sweepAutoApply} onChange={(e) => setSweepAutoApply(e.target.checked)} />
+            <Checkbox checked={sweepAutoApply} onChange={(e) => setSweepAutoApply(e.target.checked)} />
             auto-apply winner
           </label>
         </div>
         {sweepRunning && sweepProgress && (
-          <div className="mt-3 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-            <div className="h-full bg-emerald-600 transition-all" style={{ width: `${(sweepProgress.idx / sweepProgress.total) * 100}%` }} />
+          <div className="mt-3">
+            <ProgressBar done={sweepProgress.idx + 1} total={sweepProgress.total} />
           </div>
         )}
         {sweepRanked.length > 0 && (
@@ -868,18 +893,20 @@ export default function VoiceExpert() {
                     <span className="text-red-400 text-xs">missing: {r.result.qa.missing.join(', ')}</span>
                   )}
                   <span className="text-zinc-600 text-xs">{(r.result.duration_ms / 1000).toFixed(1)}s</span>
-                  <button
-                    className="text-emerald-400 hover:underline text-xs ml-auto"
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="text-emerald-400 ml-auto"
                     onClick={() => void applySweepValue(r.value)}
                   >
                     ★ {sweepParam === '__seed' ? 'use seed' : 'apply'} {r.value === bestSweepValue ? 'best' : ''}
-                  </button>
+                  </Button>
                 </div>
               );
             })}
           </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
@@ -888,8 +915,8 @@ function CleanField({ label, value, onChange, placeholder }: { label: string; va
   return (
     <label className="block">
       <span className="block text-xs text-zinc-400 mb-1">{label}</span>
-      <input
-        className="w-full rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-sm"
+      <Input
+        className="w-full"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -935,8 +962,8 @@ function BenchField({ def, draft, setDraft }: { def: ExpertOptionDef; draft: Dra
           )}
         </div>
         {def.type === 'bool' ? (
-          <select
-            className="w-full rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-sm"
+          <Select
+            className="w-full"
             value={value}
             onChange={(e) => set(e.target.value)}
             title={def.description}
@@ -944,10 +971,10 @@ function BenchField({ def, draft, setDraft }: { def: ExpertOptionDef; draft: Dra
             <option value="">default ({String(def.specDefault ?? '?')})</option>
             <option value="true">true</option>
             <option value="false">false</option>
-          </select>
+          </Select>
         ) : def.type === 'string' ? (
-          <textarea
-            className="w-full rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-sm min-h-[36px]"
+          <Textarea
+            className="w-full min-h-[36px]"
             value={value}
             onChange={(e) => set(e.target.value)}
             placeholder={def.description}
@@ -955,8 +982,8 @@ function BenchField({ def, draft, setDraft }: { def: ExpertOptionDef; draft: Dra
             rows={2}
           />
         ) : (
-          <input
-            className="w-full rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-sm"
+          <Input
+            className="w-full"
             value={value}
             onChange={(e) => set(e.target.value)}
             placeholder={`default ${def.specDefault !== undefined ? String(def.specDefault) : 'auto'}`}
@@ -987,17 +1014,13 @@ function QaLine({ qa, durationMs }: { qa: ChunkQa | null; durationMs: number }) 
       </div>
       {qa.missing.length > 0 && (
         <div>
-          {qa.missing.map((m, i) => (
-            <span key={i} className="inline-block rounded bg-red-950 border border-red-900 text-red-300 px-1.5 py-0.5 mr-1 mb-0.5">{m}</span>
-          ))}
+          {qa.missing.map((m, i) => <WordChip key={i} word={m} kind="missing" />)}
         </div>
       )}
       {qa.extra.length > 0 && (
         <div>
           <span className="text-amber-400">not in text:</span>{' '}
-          {qa.extra.map((m, i) => (
-            <span key={i} className="inline-block rounded bg-amber-950/60 border border-amber-900 text-amber-300 px-1.5 py-0.5 mr-1 mb-0.5">{m}</span>
-          ))}
+          {qa.extra.map((m, i) => <WordChip key={i} word={m} kind="extra" />)}
         </div>
       )}
     </div>

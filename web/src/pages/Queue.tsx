@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, onStudioEvent, type Book, type Stats } from '../lib/api';
-import { Button, ProgressBar, StatCard, StatusBadge, formatDuration, formatSpan } from '../components/bits';
+import { Banner, Button, Card, ProgressBar, StatCard, StatusBadge, formatDuration, formatSpan } from '../components/bits';
 
 export default function Queue() {
   const [books, setBooks] = useState<Book[]>([]);
@@ -20,14 +20,23 @@ export default function Queue() {
     });
   }, [refresh]);
 
-  const active = books.filter((b) => ['generating', 'queued', 'paused'].includes(b.status));
-  const recent = books.filter((b) => !active.includes(b));
+  // Active = the worker is actually on it or work is queued/paused for it.
+  // A canceled/paused book with no open job has stopped work → Recent instead.
+  const isOpen = (b: Book) => ['generating', 'queued'].includes(b.status) || (b.open_jobs ?? 0) > 0;
+  const active = books.filter(isOpen);
+  const recent = books.filter((b) => !isOpen(b));
   const jobFor = (bookId: string) => stats?.jobs.find((j) => j.bookId === bookId);
+  // every action triggers a book.update event anyway; the catch surfaces API
+  // errors that would otherwise vanish into an unhandled rejection
+  const queueAction = (fn: () => Promise<unknown>) =>
+    fn()
+      .then(refresh)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
 
   return (
     <div>
       <h1 className="text-2xl font-semibold mb-4">Queue</h1>
-      {error && <div className="mb-4 rounded-lg bg-red-950 border border-red-800 text-red-200 px-4 py-2 text-sm">{error}</div>}
+      {error && <Banner kind="error" className="mb-4">{error}</Banner>}
 
       {stats && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
@@ -64,7 +73,7 @@ export default function Queue() {
       {active.length === 0 && <div className="rounded-xl border border-dashed border-zinc-700 p-8 text-center text-zinc-400 mb-6">Nothing generating. Start a book from its detail page.</div>}
       <div className="space-y-3 mb-8">
         {active.map((b) => (
-          <div key={b.id} className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
+          <Card key={b.id}>
             <div className="flex items-center gap-3 mb-2">
               <Link to={`/books/${b.id}`} className="font-medium hover:underline">
                 {b.title}
@@ -93,23 +102,28 @@ export default function Queue() {
                 );
               })()}
               <div className="ml-auto flex gap-2">
-                {b.status === 'generating' ? (
-                  <Button onClick={() => api.pause(b.id).then(refresh)}>⏸ Pause</Button>
-                ) : (
-                  <Button variant="primary" onClick={() => api.generate(b.id).then(refresh).catch((e) => setError(String(e.message ?? e)))}>▶ Resume</Button>
+                {b.status === 'generating' && (
+                  <Button onClick={() => queueAction(() => api.pause(b.id))}>⏸ Pause</Button>
                 )}
-                <Button variant="danger" onClick={() => api.cancel(b.id).then(refresh)}>Cancel</Button>
+                {b.status === 'paused' && (
+                  <Button variant="primary" onClick={() => queueAction(() => api.generate(b.id))}>▶ Resume</Button>
+                )}
+                {['generating', 'queued', 'paused'].includes(b.status) && (
+                  <Button variant="danger" onClick={() => queueAction(() => api.cancel(b.id))} title="stop generation and cancel all queued work for this book — it leaves this list">
+                    Cancel
+                  </Button>
+                )}
               </div>
             </div>
-            <ProgressBar done={b.chunks_done ?? 0} total={b.chunk_count ?? 0} failed={b.chunks_failed ?? 0} />
-          </div>
+          <ProgressBar done={b.chunks_done ?? 0} total={b.chunk_count ?? 0} failed={b.chunks_failed ?? 0} />
+          </Card>
         ))}
       </div>
 
       <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-2">Finished</h2>
       <div className="space-y-2">
         {recent.map((b) => (
-          <div key={b.id} className="rounded-xl bg-zinc-900/60 border border-zinc-800 p-3 flex items-center gap-3">
+          <Card key={b.id} className="p-3! flex items-center gap-3">
             <Link to={`/books/${b.id}`} className="font-medium hover:underline flex-1 truncate">
               {b.title}
             </Link>
@@ -117,7 +131,7 @@ export default function Queue() {
             <span className="text-xs text-zinc-500">
               {b.chunks_done ?? 0}/{b.chunk_count ?? 0} · {formatDuration(b.duration_ms)}
             </span>
-          </div>
+          </Card>
         ))}
         {recent.length === 0 && <div className="text-zinc-500 text-sm">—</div>}
       </div>

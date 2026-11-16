@@ -13,25 +13,44 @@ const CHAPTER_HEAD = /^\s*(?:rozdział|rozdz|część|częsc|dział|tom|księga|
 /** Match a bare roman numeral or number on its own line ("III", "12."). */
 const NUMERAL_LINE = /^\s*((?:[IVXLCivxlc]{1,7})|\d{1,4})[.\-–—]?\s*$/;
 
+/** Match "XXIV. NA JEDEN DZIEŃ" / "1. The Journey" — numeral plus inline title. */
+const NUMERAL_HEAD = /^\s*((?:[IVXLCivxlc]{1,7})|\d{1,4})[.\-–—]?\s+(.{2,})$/;
+
+interface Boundary {
+  line: number;
+  title: string;
+  /** extra lines (the title line) consumed after the heading line itself */
+  consumed: number;
+}
+
 export function splitTxtChapters(raw: string): TxtChapter[] {
   const text = raw.replace(/\r\n?/g, '\n');
   const lines = text.split('\n');
 
-  const boundaries: Array<{ line: number; title: string }> = [];
-  let inFrontMatter = true; // treat text before the first heading as preamble
+  const boundaries: Boundary[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.trim();
     if (!line) continue;
     const headMatch = line.match(CHAPTER_HEAD);
     if (headMatch && line.length < 120) {
-      boundaries.push({ line: i, title: normalizeHead(headMatch[0]) });
-      inFrontMatter = false;
+      boundaries.push({ line: i, title: normalizeHead(headMatch[0]), consumed: 0 });
       continue;
     }
-    if (inFrontMatter) continue; // don't treat a stray number in the preamble as a chapter
+    const numeralHead = line.match(NUMERAL_HEAD);
+    if (
+      numeralHead &&
+      line.length < 120 &&
+      isTitleText(numeralHead[2]!) &&
+      (isCapsTitle(numeralHead[2]!) || looksLikeChapterContext(lines, i))
+    ) {
+      boundaries.push({ line: i, title: normalizeHead(line), consumed: 0 });
+      continue;
+    }
     if (NUMERAL_LINE.test(line) && looksLikeChapterContext(lines, i)) {
-      boundaries.push({ line: i, title: `Rozdział ${line.trim().replace(/[.\-–—]$/, '')}` });
+      const numeral = line.trim().replace(/[.\-–—]$/, '');
+      const { title, consumed } = peekTitleLine(lines, i, numeral);
+      boundaries.push({ line: i, title, consumed });
     }
   }
 
@@ -48,7 +67,7 @@ export function splitTxtChapters(raw: string): TxtChapter[] {
     }
   }
   for (let b = 0; b < boundaries.length; b++) {
-    const from = boundaries[b]!.line + 1; // skip the heading line itself
+    const from = boundaries[b]!.line + 1 + boundaries[b]!.consumed;
     const to = b + 1 < boundaries.length ? boundaries[b + 1]!.line : lines.length;
     const body = lines.slice(from, to).join('\n').trim();
     if (body.length < 40) continue;
@@ -56,6 +75,34 @@ export function splitTxtChapters(raw: string): TxtChapter[] {
   }
   if (chapters.length === 0) return [{ title: 'Całość', text: text.trim() }];
   return chapters;
+}
+
+/**
+ * A bare numeral may be followed by the chapter title on a nearby line
+ * ("XXIV" + "NA JEDEN DZIEŃ"); merge it into the title and skip it in the body.
+ */
+function peekTitleLine(lines: string[], i: number, numeral: string): { title: string; consumed: number } {
+  const next = findLine(lines, i, +1);
+  if (next !== null && next - i <= 4) {
+    const t = lines[next]!.trim();
+    if (isTitleText(t) && (isCapsTitle(t) || t.length < 100)) {
+      return { title: `Rozdział ${numeral}. ${t}`, consumed: next - i };
+    }
+  }
+  return { title: `Rozdział ${numeral}`, consumed: 0 };
+}
+
+/** Reject sentence-like text; titles don't end in sentence punctuation. */
+function isTitleText(s: string): boolean {
+  return s.length > 1 && s.length <= 100 && !/[.!?:;,]$/.test(s);
+}
+
+/** True when a string is predominantly uppercase letters (heading style). */
+function isCapsTitle(s: string): boolean {
+  const letters = s.replace(/[^\p{L}]/gu, '');
+  if (letters.length < 3) return false;
+  const upper = letters.replace(/[^\p{Lu}]/gu, '').length;
+  return upper / letters.length >= 2 / 3;
 }
 
 function normalizeHead(head: string): string {

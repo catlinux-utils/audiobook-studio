@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type Alignment } from '../lib/api';
-import { Button } from './bits';
+import { Button, SectionTitle, Textarea } from './bits';
 
 /**
  * Transcript ↔ audio verification: forced-align every transcript word to the
@@ -80,7 +80,7 @@ export default function AlignPanel({
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2 mb-2">
-        <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wide">Transcript ↔ audio</span>
+        <SectionTitle>Transcript ↔ audio</SectionTitle>
         <Button variant="ghost" onClick={runAlign} disabled={busy !== ''}>
           {busy === 'align' ? 'aligning…' : align ? '↺ re-align' : '🔍 verify transcript'}
         </Button>
@@ -94,8 +94,8 @@ export default function AlignPanel({
           </span>
         )}
       </div>
-      <textarea
-        className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm min-h-[56px]"
+      <Textarea
+        className="w-full min-h-[56px]"
         value={transcript}
         onChange={(e) => onTranscriptChange(e.target.value)}
         placeholder="transcript of the reference clip — fix words here after listening"

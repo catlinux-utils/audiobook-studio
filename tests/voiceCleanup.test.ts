@@ -35,9 +35,23 @@ describe('buildCleanupFilters', () => {
     expect(buildCleanupFilters({ fadeOutSec: 0.5 })).toBe('');
   });
 
+  it('compresses internal pauses via silenceremove stop_periods', () => {
+    expect(buildCleanupFilters({ shortenPauses: 0.2 })).toBe(
+      'silenceremove=stop_periods=-1:stop_duration=0.2:stop_threshold=-40dB',
+    );
+    expect(buildCleanupFilters({ shortenPauses: 0 })).toBe(''); // 0 = off
+    expect(buildCleanupFilters({ shortenPauses: 0.01 })).toBe(
+      'silenceremove=stop_periods=-1:stop_duration=0.05:stop_threshold=-40dB',
+    );
+    expect(buildCleanupFilters({ shortenPauses: 5 })).toBe(
+      'silenceremove=stop_periods=-1:stop_duration=2:stop_threshold=-40dB',
+    );
+  });
+
   it('chains everything in filter order', () => {
     const chain = buildCleanupFilters({
       trimSilence: true,
+      shortenPauses: 0.35,
       highpassHz: 100,
       lowpassHz: 12000,
       denoiseStrength: 20,
@@ -49,6 +63,7 @@ describe('buildCleanupFilters', () => {
     expect(chain).toBe(
       [
         'silenceremove=start_periods=1:start_threshold=-45dB',
+        'silenceremove=stop_periods=-1:stop_duration=0.35:stop_threshold=-40dB',
         'highpass=f=100',
         'lowpass=f=12000',
         'afftdn=nr=20:nf=-25',

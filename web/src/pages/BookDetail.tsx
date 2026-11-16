@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams, Link } from 'react-router-dom';
 import { api, onStudioEvent, type Book, type Chapter, type Chunk, type ChunkQa, type JobStats, type QaSample, type QaSummary, type Voice } from '../lib/api';
-import { Button, ProgressBar, StatusBadge, formatDuration, formatSpan } from '../components/bits';
+import {
+  Banner, Button, Card, Checkbox, Input, ProgressBar, QaPill, QaVerdict, Select, StatusBadge, Textarea,
+  formatDuration, formatSpan,
+} from '../components/bits';
 
 export default function BookDetail() {
   const { id = '' } = useParams();
+  const navigate = useNavigate();
   const [book, setBook] = useState<(Book & { chapters: Chapter[]; job?: JobStats | null }) | null>(null);
   const [chapterId, setChapterId] = useState<string | null>(null);
   const [chapterData, setChapterData] = useState<{ chapter: Chapter; chunks: Chunk[] } | null>(null);
@@ -21,23 +25,49 @@ export default function BookDetail() {
   const [editChapterTitle, setEditChapterTitle] = useState('');
   const [editingChapterText, setEditingChapterText] = useState(false);
   const [chapterTextDraft, setChapterTextDraft] = useState('');
+  const [chapterSizeDraft, setChapterSizeDraft] = useState('');
   const [exports, setExports] = useState<Array<{ id: string; path: string; format: string; duration_ms: number; chapter_count: number; created_at: string; qaSummary: QaSummary | null }>>([]);
   const [selectedChapters, setSelectedChapters] = useState<Set<string>>(new Set());
   const [selectedChunks, setSelectedChunks] = useState<Set<string>>(new Set());
   const [exportedNote, setExportedNote] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  // rechunk replaces every chapter id — remember the open chapter's position
+  // so the selection can follow it after a re-split
+  const chapterIdxRef = useRef(0);
 
   const refreshBook = useCallback(() => {
     api.getBook(id).then((b) => {
       setBook(b);
-      setChapterId((cur) => cur ?? b.chapters[0]?.id ?? null);
+      setChapterId((cur) => {
+        if (cur && b.chapters.some((c) => c.id === cur)) return cur;
+        return b.chapters[cur ? chapterIdxRef.current : 0]?.id ?? b.chapters[0]?.id ?? null;
+      });
     }).catch((e) => setError(String(e.message ?? e)));
   }, [id]);
 
   const refreshChapter = useCallback(() => {
     if (!chapterId) return;
-    api.getChapter(id, chapterId).then(setChapterData).catch(() => setChapterData(null));
-  }, [id, chapterId]);
+    api.getChapter(id, chapterId).then((d) => {
+      chapterIdxRef.current = d.chapter.idx;
+      setChapterData(d);
+    }).catch(() => {
+      // stale chapter id (e.g. after a book-level re-chunk) — re-resolve from the book
+      setChapterData(null);
+      refreshBook();
+    });
+  }, [id, chapterId, refreshBook]);
+
+  useEffect(() => {
+    setChapterSizeDraft(chapterData?.chapter.max_chunk_chars != null ? String(chapterData.chapter.max_chunk_chars) : '');
+  }, [chapterData?.chapter.id, chapterData?.chapter.max_chunk_chars]);
+
+  const saveChapterSize = () =>
+    act('ch-size', async () => {
+      if (!chapterData) return;
+      await api.setChapterChunkSize(id, chapterData.chapter.id, chapterSizeDraft.trim() === '' ? null : Number(chapterSizeDraft));
+      refreshChapter();
+      refreshBook();
+    });
 
   useEffect(() => {
     refreshBook();
@@ -120,13 +150,54 @@ export default function BookDetail() {
     if (errors.length) setError(errors.join(' · '));
   };
 
+  /** Re-generate every checked chapter as one job each — done parts are redone too. */
+  const regenerateSelectedChapters = async () => {
+    const ids = [...selectedChapters];
+    const errors: string[] = [];
+    for (const cid of ids) {
+      try {
+        await api.generateChapter(id, cid, true);
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    setSelectedChapters(new Set());
+    refreshBook();
+    if (errors.length) setError(errors.join(' · '));
+  };
+
   /** Queue the checked parts of this chapter as one job (done parts regenerate). */
   const queueSelectedChunks = () =>
     act('queue-sel', async () => {
-      await api.queueChunks(id, [...selectedChunks]);
+      const enabled = chapterData
+        ? [...selectedChunks].filter((cid) => !chapterData.chunks.find((c) => c.id === cid)?.disabled)
+        : [...selectedChunks];
+      if (enabled.length === 0) {
+        setError('selected parts are all disabled — enable them first');
+        return;
+      }
+      await api.queueChunks(id, enabled);
       setSelectedChunks(new Set());
       refreshBook();
     });
+
+  /** Toggle the disable flag on a set of chunks (skips queue + exports; audio is kept). */
+  const setBulkDisabled = (ids: Set<string>, disabled: boolean) => {
+    const errors: string[] = [];
+    return act('bulk-disable', async () => {
+      for (const cid of ids) {
+        try {
+          await api.setChunkDisabled(cid, disabled);
+        } catch (e) {
+          errors.push(e instanceof Error ? e.message : String(e));
+        }
+      }
+      setSelectedChunks(new Set());
+      refreshChapter();
+      refreshBook();
+      if (errors.length) setError(errors.join(' · '));
+    });
+  };
 
   const saveChapterText = () =>
     act('ch-text', async () => {
@@ -137,12 +208,22 @@ export default function BookDetail() {
       refreshBook();
     });
 
+  const deleteBook = () => {
+    if (!book) return;
+    if (!window.confirm(`Delete "${book.title}" and all its audio and exports from disk? This cannot be undone.`)) return;
+    act('delete', () => api.deleteBook(id).then(() => navigate('/')));
+  };
+
   if (!book) return <div className="text-zinc-400">{error || 'Loading…'}</div>;
 
   const doneChunks = book.chunks_done ?? 0;
   const totalChunks = book.chunk_count ?? 0;
-  // pending (or retryable) chunks of the currently selected chapter
-  const chapterPending = chapterData ? chapterData.chapter.chunk_count - chapterData.chapter.chunks_done : 0;
+  // chapter detail payload has no aggregate columns — derive from the chunk list
+  // (disabled parts are skipped by the queue, so they count toward neither side)
+  const chapterDone = chapterData ? chapterData.chunks.filter((c) => !c.disabled && c.status === 'done').length : 0;
+  const chapterPending = chapterData
+    ? chapterData.chunks.filter((c) => !c.disabled && (c.status === 'pending' || c.status === 'failed')).length
+    : 0;
   const canGenerate = Boolean(book.voice_id) && doneChunks < totalChunks;
 
   return (
@@ -151,23 +232,26 @@ export default function BookDetail() {
       <div className="flex gap-5 mb-6">
         <div className="w-28 h-40 rounded-lg bg-zinc-800 overflow-hidden shrink-0">
           {book.cover_path ? (
-            <img src={api.audioUrl.chapter === undefined ? '' : `/api/books/${book.id}/cover`} alt="" className="w-full h-full object-cover" />
+            <img src={`/api/books/${book.id}/cover`} alt="" className="w-full h-full object-cover" />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-4xl">📖</div>
           )}
         </div>
         <div className="flex-1 min-w-0">
+          <div className="text-xs text-zinc-500 mb-1">
+            <Link to="/" className="hover:text-zinc-300">← Library</Link>
+          </div>
           <div className="flex items-center gap-3 mb-1">
             {editingHeader ? (
               <div className="flex-1 flex flex-wrap gap-2">
-                <input
-                  className="flex-1 min-w-[200px] rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-lg font-semibold"
+                <Input
+                  className="flex-1 min-w-[200px] text-lg font-semibold"
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
                   placeholder="title"
                 />
-                <input
-                  className="flex-1 min-w-[160px] rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-sm"
+                <Input
+                  className="flex-1 min-w-[160px]"
                   value={editAuthor}
                   onChange={(e) => setEditAuthor(e.target.value)}
                   placeholder="author"
@@ -193,8 +277,9 @@ export default function BookDetail() {
               <>
                 <h1 className="text-2xl font-semibold truncate">{book.title}</h1>
                 <StatusBadge status={book.status} />
-                <button
-                  className="text-zinc-500 hover:text-zinc-200 text-sm"
+                <Button
+                  variant="link"
+                  size="sm"
                   title="rename book / author"
                   onClick={() => {
                     setEditTitle(book.title);
@@ -203,7 +288,10 @@ export default function BookDetail() {
                   }}
                 >
                   ✏
-                </button>
+                </Button>
+                <Button variant="danger" size="sm" onClick={deleteBook} title="delete the book with all audio and exports" disabled={busy !== ''}>
+                  🗑 delete book
+                </Button>
               </>
             )}
           </div>
@@ -255,11 +343,11 @@ export default function BookDetail() {
               ♻ Re-chunk
             </Button>
           </div>
-          {error && <div className="mt-3 rounded-lg bg-red-950 border border-red-800 text-red-200 px-3 py-1.5 text-sm">{error}</div>}
+          {error && <Banner kind="error" className="mt-3">{error}</Banner>}
           {exportedNote && !error && (
-            <div className="mt-3 rounded-lg bg-emerald-950 border border-emerald-800 text-emerald-200 px-3 py-1.5 text-sm">
+            <Banner kind="success" className="mt-3">
               ✓ {exportedNote} — see Exported audiobooks below
-            </div>
+            </Banner>
           )}
         </div>
       </div>
@@ -284,35 +372,7 @@ export default function BookDetail() {
           </div>
           {spotQa && (
             <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs space-y-1">
-              {spotQa.missing.length === 0 && spotQa.extra.length === 0 ? (
-                <div className="text-emerald-400">✓ all {spotQa.sourceWords} words present in the audio</div>
-              ) : (
-                <div className="space-y-1">
-                  {spotQa.missing.length > 0 && (
-                    <div>
-                      <span className="text-red-400 font-medium">missing:</span>{' '}
-                      {spotQa.missing.map((m, i) => (
-                        <span key={i} className="inline-block rounded bg-red-950 border border-red-900 text-red-300 px-1.5 py-0.5 mr-1 mb-0.5">
-                          {m}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {spotQa.extra.length > 0 && (
-                    <div>
-                      <span className="text-amber-400 font-medium">not in text:</span>{' '}
-                      {spotQa.extra.map((m, i) => (
-                        <span key={i} className="inline-block rounded bg-amber-950/60 border border-amber-900 text-amber-300 px-1.5 py-0.5 mr-1 mb-0.5">
-                          {m}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <div className="text-zinc-500">
-                    ASR heard: <span className="text-zinc-400">{spotQa.transcript}</span>
-                  </div>
-                </div>
-              )}
+              <QaVerdict qa={spotQa} transcript={spotQa.transcript} />
             </div>
           )}
         </div>
@@ -320,8 +380,7 @@ export default function BookDetail() {
 
       {/* ---- exports ---- */}
       {exports.length > 0 && (
-        <div className="mb-6 rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-          <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-3">Exported audiobooks</h2>
+        <Card title="Exported audiobooks" className="mb-6">
           <div className="space-y-2">
             {exports.map((x) => (
               <div key={x.id} className="flex items-center gap-3 text-sm">
@@ -330,18 +389,7 @@ export default function BookDetail() {
                   <span className="text-zinc-400 uppercase">{x.format}</span> · {x.chapter_count} chapter(s) · {formatDuration(x.duration_ms)} ·{' '}
                   {new Date(x.created_at).toLocaleString()}
                 </span>
-                {x.qaSummary && (
-                  <span
-                    className={`text-xs rounded px-1.5 py-0.5 border ${
-                      x.qaSummary.flagged > 0
-                        ? 'bg-amber-950/60 border-amber-900 text-amber-300'
-                        : 'bg-emerald-950/60 border-emerald-900 text-emerald-300'
-                    }`}
-                    title={`${x.qaSummary.missingWords} missing word(s) · WER ${(100 * (x.qaSummary.wer ?? 0)).toFixed(1)}%`}
-                  >
-                    QA {x.qaSummary.checked - x.qaSummary.flagged}/{x.qaSummary.checked} clean
-                  </span>
-                )}
+                {x.qaSummary && <QaPill qa={x.qaSummary} />}
                 <a href={`/api/exports/${x.id}/download`} className="ml-auto text-emerald-400 hover:underline">
                   ⬇ download
                 </a>
@@ -353,13 +401,13 @@ export default function BookDetail() {
               </div>
             ))}
           </div>
-        </div>
+        </Card>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5">
         {/* ---- chapters + settings column ---- */}
         <div>
-          <Panel
+          <Card
             title="Chapters"
             right={
               selectedChapters.size > 0 ? (
@@ -372,9 +420,21 @@ export default function BookDetail() {
                   >
                     ⚡ queue selected ({selectedChapters.size})
                   </Button>
-                  <button className="text-xs text-zinc-400 hover:underline" onClick={() => setSelectedChapters(new Set())}>
+                  <Button
+                    variant="ghost"
+                    disabled={busy !== '' || !book.voice_id}
+                    onClick={regenerateSelectedChapters}
+                    title={
+                      book.voice_id
+                        ? `re-generate all parts of ${selectedChapters.size} selected chapter(s) — existing audio is replaced`
+                        : 'assign a voice first'
+                    }
+                  >
+                    ♻ regenerate ({selectedChapters.size})
+                  </Button>
+                  <Button variant="link" size="sm" onClick={() => setSelectedChapters(new Set())}>
                     ✕
-                  </button>
+                  </Button>
                 </div>
               ) : undefined
             }
@@ -383,13 +443,14 @@ export default function BookDetail() {
               {book.chapters.map((c) => (
                 <div
                   key={c.id}
-                  className={`w-full rounded-lg px-3 py-2 transition-colors flex items-start gap-2 ${
+                  onClick={() => setChapterId(c.id)}
+                  className={`w-full rounded-lg px-3 py-2 transition-colors flex items-start gap-2 cursor-pointer select-none ${
                     chapterId === c.id ? 'bg-zinc-700' : 'hover:bg-zinc-800'
                   }`}
                 >
-                  <input
-                    type="checkbox"
-                    className="mt-1 shrink-0 accent-emerald-500"
+                  <Checkbox
+                    className="mt-1 shrink-0"
+                    onClick={(e) => e.stopPropagation()}
                     checked={selectedChapters.has(c.id)}
                     onChange={() =>
                       setSelectedChapters((s) => {
@@ -404,8 +465,9 @@ export default function BookDetail() {
                   <div className="flex-1 min-w-0">
                   {editingChapterId === c.id ? (
                     <div className="flex items-center gap-2">
-                      <input
-                        className="flex-1 rounded bg-zinc-800 border border-zinc-600 px-2 py-1 text-sm"
+                      <Input
+                        size="sm"
+                        className="flex-1"
                         value={editChapterTitle}
                         onChange={(e) => setEditChapterTitle(e.target.value)}
                         onKeyDown={(e) => {
@@ -414,17 +476,18 @@ export default function BookDetail() {
                           }
                         }}
                       />
-                      <button
-                        className="text-xs text-emerald-400 hover:underline"
+                      <Button
+                        variant="link"
+                        size="sm"
                         onClick={() =>
                           act('chtitle', () => api.renameChapter(id, c.id, editChapterTitle || c.title).then(refreshBook)).then(() => setEditingChapterId(null))
                         }
                       >
                         save
-                      </button>
-                      <button className="text-xs text-zinc-400 hover:underline" onClick={() => setEditingChapterId(null)}>
+                      </Button>
+                      <Button variant="link" size="sm" onClick={() => setEditingChapterId(null)}>
                         cancel
-                      </button>
+                      </Button>
                     </div>
                   ) : (
                     <button onClick={() => setChapterId(c.id)} className="w-full text-left">
@@ -432,7 +495,7 @@ export default function BookDetail() {
                         <span className="truncate">
                           {c.idx + 1}. {c.title}
                         </span>
-                        <button
+                        <span
                           className="text-zinc-500 hover:text-zinc-200 text-xs shrink-0"
                           title="rename chapter"
                           onClick={(e) => {
@@ -442,7 +505,7 @@ export default function BookDetail() {
                           }}
                         >
                           ✏
-                        </button>
+                        </span>
                       </div>
                     </button>
                   )}
@@ -457,12 +520,12 @@ export default function BookDetail() {
                 </div>
               ))}
             </div>
-          </Panel>
+          </Card>
 
-          <Panel title="Voice & params" className="mt-4">
+          <Card title="Voice & params" className="mt-4">
             <label className="block text-xs text-zinc-400 mb-1">Voice</label>
-            <select
-              className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-sm mb-3"
+            <Select
+              className="w-full mb-3"
               value={book.voice_id ?? ''}
               onChange={(e) => act('voice', () => api.updateBook(id, { voiceId: e.target.value || null })).then(refreshBook)}
             >
@@ -472,19 +535,19 @@ export default function BookDetail() {
                   {v.name}
                 </option>
               ))}
-            </select>
-            <ParamRow label="Chunk size (chars)" defaultValue={book.max_chunk_chars} onSave={(v) => act('rechunk', () => api.updateBook(id, { maxChunkChars: v, force: true }).then(refreshBook))} hint="changing this re-splits all chunks" />
+            </Select>
+            <ParamRow label="Chunk size (chars)" defaultValue={book.max_chunk_chars} onSave={(v) => act('rechunk', () => api.rechunk(id, Number(v)).then(refreshBook))} hint="type a value and press Enter (or 'save') — re-splits all chunks" />
             <ParamRow label="Inference steps" defaultValue={book.num_inference_steps} onSave={(v) => act('steps', () => api.updateBook(id, { numInferenceSteps: v }))} />
             <ParamRow label="Guidance" defaultValue={book.guidance_scale} onSave={(v) => act('guid', () => api.updateBook(id, { guidanceScale: v }))} />
             <ParamRow label="Speed" defaultValue={book.speed} onSave={(v) => act('speed', () => api.updateBook(id, { speed: v }))} />
             <ParamRow label="Seed (blank = random)" defaultValue={book.seed ?? ''} onSave={(v) => act('seed', () => api.updateBook(id, { seed: v || null }))} />
-          </Panel>
+          </Card>
         </div>
 
         {/* ---- chapter view ---- */}
         <div>
           {chapterData ? (
-            <Panel
+            <Card
               title={`${chapterData.chapter.idx + 1}. ${chapterData.chapter.title}`}
               right={
                 <div className="flex items-center gap-2">
@@ -495,16 +558,28 @@ export default function BookDetail() {
                     title={
                       !book.voice_id
                         ? 'assign a voice first'
-                        : chapterPending === 0
-                          ? 'this chapter has no pending chunks'
-                          : `add this chapter to the generation queue (${chapterPending} chunks; chapters run one after another)`
+                        : `add this chapter to the generation queue (${chapterPending} pending chunks; chapters run one after another)`
                     }
                   >
                     ⚡ queue chapter{chapterPending > 0 ? ` (${chapterPending})` : ''}
                   </Button>
+                  {chapterPending === 0 && (
+                    <Button
+                      variant="ghost"
+                      disabled={busy !== '' || !book.voice_id || chapterDone === 0}
+                      onClick={() => act('regen-ch', () => api.generateChapter(id, chapterData.chapter.id, true).then(refreshBook))}
+                      title={
+                        !book.voice_id
+                          ? 'assign a voice first'
+                          : `re-generate all ${chapterDone} parts of this chapter — existing audio is replaced`
+                      }
+                    >
+                      ♻ regenerate chapter
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
-                    disabled={chapterData.chunks.filter((c) => c.status === 'done').length === 0}
+                    disabled={chapterDone === 0}
                     onClick={() => playUrl(api.audioUrl.chapter(id, chapterId!))}
                   >
                     ▶ play whole chapter
@@ -513,7 +588,7 @@ export default function BookDetail() {
                     variant="ghost"
                     disabled={busy !== ''}
                     onClick={() => {
-                      setChapterTextDraft(chapterData.chunks.map((c) => c.text).join('\n\n'));
+                      setChapterTextDraft(chapterData.chunks.filter((c) => !c.disabled).map((c) => c.text).join('\n\n'));
                       setEditingChapterText(true);
                     }}
                     title="edit the chapter's full text (re-splits into parts)"
@@ -551,8 +626,8 @@ export default function BookDetail() {
             >
               {editingChapterText && (
                 <div className="mb-3 rounded-lg border border-yellow-800 bg-yellow-950/20 p-3">
-                  <textarea
-                    className="w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm min-h-[220px]"
+                  <Textarea
+                    className="w-full min-h-[220px]"
                     value={chapterTextDraft}
                     onChange={(e) => setChapterTextDraft(e.target.value)}
                     placeholder="chapter text…"
@@ -572,8 +647,22 @@ export default function BookDetail() {
               )}
               {chapterData.chunks.length > 0 && <ChunkTimeline chunks={chapterData.chunks} onSeek={(ms) => seekChapter(ms)} />}
               <audio ref={audioRef} controls className="w-full mt-3 mb-4" />
+              <div className="flex items-center gap-2 mb-4 text-xs text-zinc-500">
+                <span>Part size (chars):</span>
+                <input
+                  className="w-20 rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs"
+                  value={chapterSizeDraft}
+                  placeholder={`book default (${book.max_chunk_chars})`}
+                  onChange={(e) => setChapterSizeDraft(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && saveChapterSize()}
+                />
+                <Button size="sm" variant="ghost" disabled={busy !== ''} onClick={saveChapterSize}>
+                  apply — re-splits this chapter
+                </Button>
+                <span className="text-[11px] text-zinc-600">current chapter only; drops this chapter's audio</span>
+              </div>
               {selectedChunks.size > 0 && (
-                <div className="flex items-center gap-2 mb-2 rounded-lg bg-emerald-950/40 border border-emerald-900 px-3 py-1.5 text-sm">
+                <div className="flex flex-wrap items-center gap-2 mb-2 rounded-lg bg-emerald-950/40 border border-emerald-900 px-3 py-1.5 text-sm">
                   <span className="text-emerald-300">{selectedChunks.size} part{selectedChunks.size > 1 ? 's' : ''} selected</span>
                   <Button
                     variant="ghost"
@@ -583,9 +672,25 @@ export default function BookDetail() {
                   >
                     ⚡ queue selected parts
                   </Button>
-                  <button className="text-xs text-zinc-400 hover:underline" onClick={() => setSelectedChunks(new Set())}>
+                  <Button
+                    variant="ghost"
+                    disabled={busy !== ''}
+                    onClick={() => setBulkDisabled(selectedChunks, true)}
+                    title="exclude the selected parts from queueing and exports (their audio is kept)"
+                  >
+                    🚫 disable selected
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    disabled={busy !== ''}
+                    onClick={() => setBulkDisabled(selectedChunks, false)}
+                    title="include the selected parts in queueing and exports again"
+                  >
+                    ✅ enable selected
+                  </Button>
+                  <Button variant="link" size="sm" onClick={() => setSelectedChunks(new Set())}>
                     ✕ clear
-                  </button>
+                  </Button>
                 </div>
               )}
               <div className="space-y-1.5 max-h-[480px] overflow-y-auto pr-1">
@@ -608,7 +713,7 @@ export default function BookDetail() {
                   />
                 ))}
               </div>
-            </Panel>
+            </Card>
           ) : (
             <div className="text-zinc-500">Select a chapter.</div>
           )}
@@ -645,16 +750,16 @@ export default function BookDetail() {
 /* ---------- chunk timeline: visual cut-point map ---------- */
 
 function ChunkTimeline({ chunks, onSeek }: { chunks: Chunk[]; onSeek: (ms: number) => void }) {
-  const done = chunks.filter((c) => c.status === 'done' && c.duration_ms);
+  const done = chunks.filter((c) => !c.disabled && c.status === 'done' && c.duration_ms);
   if (done.length === 0) return null;
   const starts = new Map<string, number>();
   let cursor = 0;
   for (const c of chunks) {
     starts.set(c.id, cursor);
-    if (c.status === 'done' && c.duration_ms) cursor += c.duration_ms;
+    if (!c.disabled && c.status === 'done' && c.duration_ms) cursor += c.duration_ms;
   }
   const total = cursor;
-  const totalWeight = chunks.reduce((a, c) => a + (c.status === 'done' && c.duration_ms ? c.duration_ms : c.text.length), 0);
+  const totalWeight = chunks.reduce((a, c) => a + (!c.disabled && c.status === 'done' && c.duration_ms ? c.duration_ms : c.text.length), 0);
   const colors: Record<string, string> = {
     done: 'bg-emerald-600 hover:bg-emerald-500',
     failed: 'bg-red-700 hover:bg-red-600',
@@ -665,20 +770,21 @@ function ChunkTimeline({ chunks, onSeek }: { chunks: Chunk[]; onSeek: (ms: numbe
     <div>
       <div className="flex h-6 w-full rounded-md overflow-hidden gap-px bg-zinc-900" title="each segment = one chunk; click to jump into the chapter audio">
         {chunks.map((c) => {
-          const weight = c.status === 'done' && c.duration_ms ? c.duration_ms : c.text.length;
+          const weight = !c.disabled && c.status === 'done' && c.duration_ms ? c.duration_ms : c.text.length;
+          const cls = c.disabled ? 'bg-zinc-800' : c.queued && c.status === 'pending' ? 'bg-amber-700' : colors[c.status];
           return (
             <div
               key={c.id}
-              className={`${colors[c.status]} cursor-pointer transition-colors`}
+              className={`${cls} ${c.disabled ? '' : 'cursor-pointer'} transition-colors`}
               style={{ width: `${Math.max((weight / totalWeight) * 100, 0.5)}%` }}
-              title={`#${c.idx + 1} ${c.status} ${formatDuration(c.duration_ms)} — ${c.text.slice(0, 60)}…`}
-              onClick={() => starts.get(c.id) !== undefined && onSeek(starts.get(c.id)!)}
+              title={`#${c.idx + 1} ${c.disabled ? 'disabled' : c.status} ${formatDuration(c.duration_ms)} — ${c.text.slice(0, 60)}…`}
+              onClick={() => !c.disabled && starts.get(c.id) !== undefined && onSeek(starts.get(c.id)!)}
             />
           );
         })}
       </div>
       <div className="text-xs text-zinc-500 mt-1">
-        cut map — {chunks.filter((c) => c.status === 'done').length} generated · total {formatDuration(total)} · click a segment to hear the cut in context
+        cut map — {chunks.filter((c) => !c.disabled && c.status === 'done').length} generated · total {formatDuration(total)} · click a segment to hear the cut in context
       </div>
     </div>
   );
@@ -749,37 +855,50 @@ function ChunkRow({
     }
   };
 
+  const toggleDisabled = async () => {
+    try {
+      await api.setChunkDisabled(chunk.id, !chunk.disabled);
+      onChanged();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   return (
-    <div className={`rounded-lg border px-3 py-2 text-sm ${chunk.status === 'failed' ? 'border-red-900 bg-red-950/40' : 'border-zinc-800 bg-zinc-900/70'}`}>
+    <div className={`rounded-lg border px-3 py-2 text-sm ${chunk.disabled ? 'border-zinc-800 bg-zinc-950/60 opacity-60' : chunk.status === 'failed' ? 'border-red-900 bg-red-950/40' : 'border-zinc-800 bg-zinc-900/70'}`}>
       <div className="flex items-center gap-2 mb-1">
         {onToggleSelect && (
-          <input
-            type="checkbox"
-            className="shrink-0 accent-emerald-500"
+          <Checkbox
+            className="shrink-0"
             checked={selected ?? false}
             onChange={onToggleSelect}
             title="select this part for queueing"
           />
         )}
         <span className="text-xs text-zinc-500 w-12">#{chunk.idx + 1}</span>
+        {chunk.disabled && <StatusBadge status="disabled" />}
         <StatusBadge status={chunk.status} />
+        {chunk.queued && chunk.status === 'pending' && (
+          <span className="rounded px-1.5 py-0.5 text-[10px] bg-amber-950 text-amber-400 border border-amber-900">⏳ in queue</span>
+        )}
         <span className="text-xs text-zinc-500">{formatDuration(chunk.duration_ms)}</span>
         <span className="text-xs text-zinc-600">
           chars {chunk.char_start}–{chunk.char_end}
         </span>
         {chunk.status === 'done' && (
-          <button className="text-xs text-emerald-400 hover:underline ml-auto" onClick={onPlay}>
+          <Button variant="link" size="sm" className="text-emerald-400" onClick={onPlay}>
             ▶ play
-          </button>
+          </Button>
         )}
         {chunk.status === 'done' && (
-          <button className="text-xs text-sky-400 hover:underline" onClick={checkWords} disabled={qaBusy}>
+          <Button variant="link" size="sm" className="text-sky-400" onClick={checkWords} disabled={qaBusy}>
             {qaBusy ? 'checking…' : '🔤 check words'}
-          </button>
+          </Button>
         )}
         {chunk.status !== 'generating' && (
-          <button
-            className="text-xs text-zinc-400 hover:underline"
+          <Button
+            variant="link"
+            size="sm"
             onClick={() => {
               setDraft(chunk.text);
               setEditing(true);
@@ -787,18 +906,50 @@ function ChunkRow({
             title="fix the text — audio of the old text is dropped"
           >
             ✏ edit
-          </button>
+          </Button>
         )}
         {chunk.status !== 'generating' && (
-          <button className="text-xs text-zinc-400 hover:underline" onClick={() => setShowSeed((s) => !s)}>
-            ♻ regenerate
-          </button>
+          <Button
+            variant="link"
+            size="sm"
+            disabled={regenerating}
+            onClick={() => regenerate()}
+            title="regenerate this part immediately"
+          >
+            {regenerating ? 'generating…' : '♻ regenerate'}
+          </Button>
+        )}
+        {chunk.status !== 'generating' && (
+          <Button
+            variant="link"
+            size="sm"
+            className="text-zinc-500"
+            onClick={() => setShowSeed((s) => !s)}
+            title="regenerate with a specific seed"
+          >
+            🎲
+          </Button>
+        )}
+        {chunk.status !== 'generating' && (
+          <Button
+            variant="link"
+            size="sm"
+            className={chunk.disabled ? 'text-emerald-400' : 'text-zinc-500'}
+            onClick={toggleDisabled}
+            title={
+              chunk.disabled
+                ? 'include this part in queueing and exports again'
+                : 'exclude this part from queueing and exports (audio is kept; the flag is lost if the chapter text is re-split)'
+            }
+          >
+            {chunk.disabled ? '✅ enable' : '🚫 disable'}
+          </Button>
         )}
       </div>
       {editing ? (
         <div className="mt-1">
-          <textarea
-            className="w-full rounded bg-zinc-800 border border-yellow-700 px-2 py-1.5 text-sm min-h-[90px]"
+          <Textarea
+            className="w-full border-yellow-700 min-h-[90px]"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             autoFocus
@@ -819,41 +970,14 @@ function ChunkRow({
       {chunk.error && <div className="text-xs text-red-400 mt-1">{chunk.error}</div>}
       {qa && (
         <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs space-y-1">
-          {qa.missing.length === 0 && qa.extra.length === 0 ? (
-            <div className="text-emerald-400">✓ all {qa.sourceWords} words present in the audio</div>
-          ) : (
-            <div className="space-y-1">
-              {qa.missing.length > 0 && (
-                <div>
-                  <span className="text-red-400 font-medium">missing:</span>{' '}
-                  {qa.missing.map((m, i) => (
-                    <span key={i} className="inline-block rounded bg-red-950 border border-red-900 text-red-300 px-1.5 py-0.5 mr-1 mb-0.5">
-                      {m}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {qa.extra.length > 0 && (
-                <div>
-                  <span className="text-amber-400 font-medium">not in text:</span>{' '}
-                  {qa.extra.map((m, i) => (
-                    <span key={i} className="inline-block rounded bg-amber-950/60 border border-amber-900 text-amber-300 px-1.5 py-0.5 mr-1 mb-0.5">
-                      {m}
-                    </span>
-                  ))}
-                </div>
-              )}
-              <div className="text-zinc-500">
-                ASR heard: <span className="text-zinc-400">{qa.transcript}</span>
-              </div>
-            </div>
-          )}
+          <QaVerdict qa={qa} transcript={qa.transcript} />
         </div>
       )}
       {showSeed && (
         <div className="flex items-center gap-2 mt-2">
-          <input
-            className="rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs w-32"
+          <Input
+            size="sm"
+            className="w-32"
             placeholder="seed (blank = book)"
             value={seed}
             onChange={(e) => setSeed(e.target.value)}
@@ -869,18 +993,6 @@ function ChunkRow({
 
 /* ---------- misc ---------- */
 
-function Panel({ title, children, right, className = '' }: { title: string; children: React.ReactNode; right?: React.ReactNode; className?: string }) {
-  return (
-    <div className={`rounded-xl bg-zinc-900 border border-zinc-800 p-4 ${className}`}>
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide">{title}</h2>
-        {right}
-      </div>
-      {children}
-    </div>
-  );
-}
-
 function ParamRow({ label, defaultValue, onSave, hint }: { label: string; defaultValue: number | string; onSave: (v: number | string) => void; hint?: string }) {
   const [value, setValue] = useState(String(defaultValue));
   const [dirty, setDirty] = useState(false);
@@ -890,8 +1002,9 @@ function ParamRow({ label, defaultValue, onSave, hint }: { label: string; defaul
     <div className="mb-2">
       <div className="flex items-center gap-2">
         <label className="text-xs text-zinc-400 flex-1">{label}</label>
-        <input
-          className={`w-24 rounded bg-zinc-800 border px-2 py-1 text-xs ${dirty ? 'border-yellow-600' : 'border-zinc-700'}`}
+        <Input
+          size="sm"
+          className={`w-24 ${dirty ? 'border-yellow-600' : ''}`}
           value={value}
           inputMode={numeric ? 'decimal' : 'text'}
           onChange={(e) => {
@@ -906,15 +1019,17 @@ function ParamRow({ label, defaultValue, onSave, hint }: { label: string; defaul
           }}
         />
         {dirty && (
-          <button
-            className="text-xs text-emerald-400 hover:underline"
+          <Button
+            variant="link"
+            size="sm"
+            className="text-emerald-400"
             onClick={() => {
               onSave(numeric ? Number(value) : value);
               setDirty(false);
             }}
           >
             save
-          </button>
+          </Button>
         )}
       </div>
       {hint && <div className="text-[10px] text-zinc-600">{hint}</div>}

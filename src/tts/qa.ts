@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { sameNumber } from '../text/numberWords.js';
 import { loadSettings, paths } from '../config.js';
 import { ttsBaseUrl } from './managed.js';
 import { AudioCppClient } from './audiocpp.js';
@@ -99,7 +100,8 @@ export function diffWordsFuzzy(sourceText: string, transcript: string): WordQa {
     kind[i] = [];
     for (let j = 0; j < n; j++) {
       const d = levenshtein(src[i]!, heard[j]!);
-      kind[i]![j] = d === 0 ? 0 : d <= editTolerance(src[i]!) ? 1 : 2;
+      // digits match their spoken Polish number words exactly (7 ↔ siódmy)
+      kind[i]![j] = d === 0 || sameNumber(src[i]!, heard[j]!) ? 0 : d <= editTolerance(src[i]!) ? 1 : 2;
     }
   }
 

@@ -3,6 +3,7 @@ import '@fastify/multipart';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { DatabaseSync } from 'node:sqlite';
 import { getDb, type BookRow, type ChapterRow, type ChunkRow, type VoiceRow, type VoiceTakeRow } from '../db.js';
 import { paths, loadSettings, saveSettings, type AppSettings } from '../config.js';
 import { parseEpub } from '../ingest/epub.js';
@@ -16,7 +17,7 @@ import { sanitizeExpertOptions, expertOptionsToRequest, type ExpertOptions } fro
 import { applyVoiceCleanup, CLEANUP_MAX_BYTES, type CleanupOptions } from '../audio/voiceCleanup.js';
 import { analyzeWav, suggestCleanup } from '../audio/analyze.js';
 import { readWavInfo } from '../audio/wavmeta.js';
-import { assembleChapter, exportM4b, exportChapterMp3 } from '../audio/assemble.js';
+import { assembleChapter, exportM4b, exportChapterMp3, type AssemblyChunk } from '../audio/assemble.js';
 import { bus } from '../bus.js';
 import { ttsBaseUrl } from '../tts/managed.js';
 import { spawn } from 'node:child_process';
@@ -36,6 +37,34 @@ export function registerRoutes(app: FastifyInstance): void {
     }
   });
 
+  // ---------- server log ----------
+  app.get('/api/logs/tail', async (req) => {
+    const q = req.query as { lines?: string };
+    const want = Math.min(Math.max(Number(q.lines) || 200, 1), 2000);
+    try {
+      if (!fs.existsSync(paths.serverLog)) return { lines: [], truncated: false };
+      const stat = fs.statSync(paths.serverLog);
+      // read the last chunk only — the log can grow unbounded
+      const readBytes = Math.min(stat.size, 512 * 1024);
+      const start = Math.max(0, stat.size - readBytes);
+      const buf = Buffer.alloc(readBytes);
+      const fd = fs.openSync(paths.serverLog, 'r');
+      try {
+        fs.readSync(fd, buf, 0, readBytes, start);
+      } finally {
+        fs.closeSync(fd);
+      }
+      const all = buf.toString('utf8').split('\n');
+      // drop the partial first line when we didn't start at the file beginning
+      if (start > 0) all.shift();
+      if (all.length > 0 && all[all.length - 1] === '') all.pop();
+      const truncated = all.length > want;
+      return { lines: truncated ? all.slice(-want) : all, truncated };
+    } catch (err) {
+      return { lines: [`failed to read log: ${err instanceof Error ? err.message : String(err)}`], truncated: false };
+    }
+  });
+
   // ---------- settings ----------
   app.get('/api/settings', async () => publicSettings(loadSettings()));
   app.put('/api/settings', async (req) => {
@@ -50,6 +79,10 @@ export function registerRoutes(app: FastifyInstance): void {
       ffmpegPath: body.ffmpegPath ?? current.ffmpegPath,
       defaultMaxChunkChars: clampInt(body.defaultMaxChunkChars ?? current.defaultMaxChunkChars, 60, 2000),
       port: clampInt(body.port ?? current.port, 1, 65535),
+      assemblySmooth: body.assemblySmooth === undefined ? current.assemblySmooth : Boolean(body.assemblySmooth),
+      assemblyGapMs: clampInt(body.assemblyGapMs ?? current.assemblyGapMs, 0, 2000),
+      assemblyParagraphGapMs: clampInt(body.assemblyParagraphGapMs ?? current.assemblyParagraphGapMs, 0, 2000),
+      assemblySoftCutGapMs: clampInt(body.assemblySoftCutGapMs ?? current.assemblySoftCutGapMs, 0, 2000),
     };
     saveSettings(next);
     return publicSettings(next);
@@ -62,9 +95,9 @@ export function registerRoutes(app: FastifyInstance): void {
       .prepare(
         `SELECT
            (SELECT COUNT(*) FROM books) AS books,
-           (SELECT COUNT(*) FROM chunks WHERE status='done') AS chunks_done,
-           (SELECT COUNT(*) FROM chunks WHERE status='failed') AS chunks_failed,
-           (SELECT COALESCE(SUM(duration_ms),0) FROM chunks WHERE status='done') AS audio_ms`,
+           (SELECT COUNT(*) FROM chunks WHERE status='done' AND disabled=0) AS chunks_done,
+           (SELECT COUNT(*) FROM chunks WHERE status='failed' AND disabled=0) AS chunks_failed,
+           (SELECT COALESCE(SUM(duration_ms),0) FROM chunks WHERE status='done' AND disabled=0) AS audio_ms`,
       )
       .get() as unknown as { books: number; chunks_done: number; chunks_failed: number; audio_ms: number };
 
@@ -147,11 +180,12 @@ export function registerRoutes(app: FastifyInstance): void {
       .prepare(
         `SELECT b.*,
            (SELECT COUNT(*) FROM chapters c WHERE c.book_id=b.id) AS chapter_count,
-           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=b.id) AS chunk_count,
-           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=b.id AND k.status='done') AS chunks_done,
-           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=b.id AND k.status='failed') AS chunks_failed,
-           (SELECT COALESCE(SUM(k.duration_ms),0) FROM chunks k WHERE k.book_id=b.id AND k.status='done') AS duration_ms,
-           (SELECT v.name FROM voices v WHERE v.id=b.voice_id) AS voice_name
+           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=b.id AND k.disabled=0) AS chunk_count,
+           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=b.id AND k.status='done' AND k.disabled=0) AS chunks_done,
+           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=b.id AND k.status='failed' AND k.disabled=0) AS chunks_failed,
+           (SELECT COALESCE(SUM(k.duration_ms),0) FROM chunks k WHERE k.book_id=b.id AND k.status='done' AND k.disabled=0) AS duration_ms,
+           (SELECT v.name FROM voices v WHERE v.id=b.voice_id) AS voice_name,
+           (SELECT COUNT(*) FROM jobs jx WHERE jx.book_id=b.id AND jx.state IN ('running','paused','queued')) AS open_jobs
          FROM books b ORDER BY b.created_at DESC`,
       )
       .all() as unknown as BookSummary[];
@@ -240,7 +274,7 @@ export function registerRoutes(app: FastifyInstance): void {
 
     insertChaptersAndChunks(bookId, [{ title: 'Full text', text }], s.defaultMaxChunkChars);
     const chapter = db.prepare('SELECT id FROM chapters WHERE book_id=? ORDER BY idx LIMIT 1').get(bookId) as unknown as { id: string };
-    const chunkCount = (db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE book_id=?').get(bookId) as unknown as { n: number }).n;
+    const chunkCount = (db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND disabled=0').get(bookId) as unknown as { n: number }).n;
     bus.emit('event', { type: 'book.update', bookId, status: 'draft' });
     return { id: bookId, chapterId: chapter.id, chunkCount };
   });
@@ -253,10 +287,10 @@ export function registerRoutes(app: FastifyInstance): void {
     const chapters = db
       .prepare(
         `SELECT c.*, 
-           (SELECT COUNT(*) FROM chunks k WHERE k.chapter_id=c.id) AS chunk_count,
-           (SELECT COUNT(*) FROM chunks k WHERE k.chapter_id=c.id AND k.status='done') AS chunks_done,
-           (SELECT COUNT(*) FROM chunks k WHERE k.chapter_id=c.id AND k.status='failed') AS chunks_failed,
-           (SELECT COALESCE(SUM(k.duration_ms),0) FROM chunks k WHERE k.chapter_id=c.id AND k.status='done') AS duration_ms
+           (SELECT COUNT(*) FROM chunks k WHERE k.chapter_id=c.id AND k.disabled=0) AS chunk_count,
+           (SELECT COUNT(*) FROM chunks k WHERE k.chapter_id=c.id AND k.status='done' AND k.disabled=0) AS chunks_done,
+           (SELECT COUNT(*) FROM chunks k WHERE k.chapter_id=c.id AND k.status='failed' AND k.disabled=0) AS chunks_failed,
+           (SELECT COALESCE(SUM(k.duration_ms),0) FROM chunks k WHERE k.chapter_id=c.id AND k.status='done' AND k.disabled=0) AS duration_ms
          FROM chapters c WHERE c.book_id=? ORDER BY c.idx`,
       )
       .all(id) as unknown as ChapterSummary[];
@@ -301,9 +335,9 @@ export function registerRoutes(app: FastifyInstance): void {
       const counts = db
         .prepare(
           `SELECT
-             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope}) AS total,
-             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope} AND k.status='done') AS done,
-             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope} AND k.status='failed') AS failed`,
+             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope} AND k.disabled=0) AS total,
+             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope} AND k.status='done' AND k.disabled=0) AS done,
+             (SELECT COUNT(*) FROM chunks k WHERE k.book_id=? ${scope} AND k.status='failed' AND k.disabled=0) AS failed`,
         )
         .get(id, ...scopeArgs, id, ...scopeArgs, id, ...scopeArgs) as unknown as {
         total: number;
@@ -347,9 +381,34 @@ export function registerRoutes(app: FastifyInstance): void {
       .get(chapterId, id) as unknown as ChapterRow | undefined;
     if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
     const chunks = db
-      .prepare('SELECT id, idx, text, char_start, char_end, status, duration_ms, error, attempts FROM chunks WHERE chapter_id=? ORDER BY idx')
+      .prepare('SELECT id, idx, text, char_start, char_end, status, disabled, duration_ms, error, attempts FROM chunks WHERE chapter_id=? ORDER BY idx')
       .all(chapterId) as unknown as ChunkRow[];
-    return { chapter, chunks };
+    // "queued" = will be generated by an open job (chapter-scoped, book-wide or
+    // explicit list) or is waiting for a priority regeneration
+    const queued = new Set<string>();
+    const openJobs = db
+      .prepare("SELECT id, chapter_id FROM jobs WHERE book_id=? AND state IN ('running','paused','queued')")
+      .all(id) as unknown as Array<{ id: string; chapter_id: string | null }>;
+    let bookWide = false;
+    for (const j of openJobs) {
+      if (j.chapter_id === chapterId) {
+        for (const r of db.prepare("SELECT id FROM chunks WHERE chapter_id=? AND status='pending' AND disabled=0").all(chapterId) as unknown as Array<{ id: string }>) {
+          queued.add(r.id);
+        }
+      } else if (j.chapter_id === null) {
+        bookWide = true;
+      }
+      for (const r of db.prepare('SELECT chunk_id FROM job_chunks WHERE job_id=?').all(j.id) as unknown as Array<{ chunk_id: string }>) {
+        queued.add(r.chunk_id);
+      }
+    }
+    if (bookWide) {
+      for (const r of db.prepare("SELECT id FROM chunks WHERE chapter_id=? AND status='pending' AND disabled=0").all(chapterId) as unknown as Array<{ id: string }>) {
+        queued.add(r.id);
+      }
+    }
+    for (const cid of queue.regenQueuedIds()) queued.add(cid);
+    return { chapter, chunks: chunks.map((c) => ({ ...c, queued: queued.has(c.id) })) };
   });
 
   app.patch('/api/books/:id', async (req, reply) => {
@@ -393,6 +452,39 @@ export function registerRoutes(app: FastifyInstance): void {
     return getBookPayload(id);
   });
 
+  // ---------- maintenance ----------
+  /** Remove derived assembly-prep caches (.prep* dirs) for every book.
+   *  They rebuild on demand at the next playback/export. */
+  app.post('/api/maintenance/prep-cache', async () => {
+    let dirsRemoved = 0;
+    let bytesFreed = 0;
+    const booksDir = paths.books;
+    if (fs.existsSync(booksDir)) {
+      for (const book of fs.readdirSync(booksDir)) {
+        const audioDir = path.join(booksDir, book, 'audio');
+        if (!fs.existsSync(audioDir)) continue;
+        for (const entry of fs.readdirSync(audioDir)) {
+          if (!entry.startsWith('.prep')) continue;
+          const dir = path.join(audioDir, entry);
+          const size = (function dirSize(p: string): number {
+            let n = 0;
+            for (const e of fs.readdirSync(p, { withFileTypes: true })) {
+              const fp = path.join(p, e.name);
+              if (e.isDirectory()) n += dirSize(fp);
+              else n += fs.statSync(fp).size;
+            }
+            return n;
+          })(dir);
+          fs.rmSync(dir, { recursive: true, force: true });
+          dirsRemoved++;
+          bytesFreed += size;
+        }
+      }
+    }
+    bus.emit('event', { type: 'voices.update' });
+    return { ok: true, dirsRemoved, bytesFreed };
+  });
+
   app.delete('/api/books/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     queue.cancelBook(id);
@@ -405,18 +497,69 @@ export function registerRoutes(app: FastifyInstance): void {
 
   app.patch('/api/books/:id/chapters/:chapterId', async (req, reply) => {
     const { id, chapterId } = req.params as { id: string; chapterId: string };
-    const body = (req.body ?? {}) as { title?: string };
-    if (body.title === undefined) return reply.code(400).send({ error: 'title is required' });
-    const title = String(body.title).trim().slice(0, 200);
-    if (!title) return reply.code(400).send({ error: 'title cannot be empty' });
+    const body = (req.body ?? {}) as { title?: string; maxChunkChars?: number | null };
+    if (body.title === undefined && body.maxChunkChars === undefined) {
+      return reply.code(400).send({ error: 'title or maxChunkChars is required' });
+    }
     const db = getDb();
-    const result = db
-      .prepare('UPDATE chapters SET title=? WHERE id=? AND book_id=?')
-      .run(title, chapterId, id);
-    if (result.changes === 0) return reply.code(404).send({ error: 'chapter not found' });
+    const chapter = db
+      .prepare('SELECT * FROM chapters WHERE id=? AND book_id=?')
+      .get(chapterId, id) as unknown as ChapterRow | undefined;
+    if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
+
+    if (body.title !== undefined) {
+      const title = String(body.title).trim().slice(0, 200);
+      if (!title) return reply.code(400).send({ error: 'title cannot be empty' });
+      db.prepare('UPDATE chapters SET title=? WHERE id=? AND book_id=?').run(title, chapterId, id);
+    }
+    let chunkSize: number | null = chapter.max_chunk_chars;
+    if (body.maxChunkChars !== undefined) {
+      // per-chapter part-size override; null = book default. Changing it re-splits
+      // the chapter from its current text (existing audio is dropped — invariant).
+      chunkSize =
+        body.maxChunkChars === null ? null : clampInt(Number(body.maxChunkChars), 60, 5000);
+      db.prepare('UPDATE chapters SET max_chunk_chars=? WHERE id=?').run(chunkSize, chapterId);
+      const generating = db
+        .prepare("SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=? AND status='generating'")
+        .get(chapterId) as unknown as { n: number };
+      if (generating.n > 0) return reply.code(409).send({ error: 'parts of this chapter are generating right now — pause or wait first' });
+      const text = reconstructChapterText(chapterId);
+      if (text === null) return reply.code(409).send({ error: 'chapter has no text to re-split — paste or edit the chapter text first' });
+      const olds = db.prepare('SELECT audio_path FROM chunks WHERE chapter_id=?').all(chapterId) as unknown as Array<{ audio_path: string | null }>;
+      for (const o of olds) if (o.audio_path) fs.rmSync(o.audio_path, { force: true });
+      db.prepare('DELETE FROM chunks WHERE chapter_id=?').run(chapterId);
+      const book = db.prepare('SELECT max_chunk_chars FROM books WHERE id=?').get(id) as unknown as { max_chunk_chars: number };
+      rechunkChapterText(chapterId, id, text, chunkSize ?? book.max_chunk_chars);
+      queue.refreshBookStatus(id);
+    }
     bus.emit('event', { type: 'book.update', bookId: id, status: 'meta' });
-    return { id: chapterId, title };
+    const updated = db.prepare('SELECT * FROM chapters WHERE id=?').get(chapterId) as unknown as ChapterRow;
+    return { ...updated, chunkCount: chapter.max_chunk_chars !== chunkSize ? countChapterChunks(chapterId) : undefined };
   });
+
+  /** Rebuild a chapter's text from its chunk rows (chunks store text + char
+   *  offsets into the normalized chapter text; span gaps ≥ 2 are '\n\n'). */
+  function reconstructChapterText(chapterId: string): string | null {
+    const db = getDb();
+    const rows = db
+      .prepare('SELECT text, char_start, char_end FROM chunks WHERE chapter_id=? ORDER BY idx')
+      .all(chapterId) as unknown as Array<{ text: string; char_start: number; char_end: number }>;
+    if (rows.length === 0) return null;
+    let text = '';
+    let end = 0;
+    for (const r of rows) {
+      const gap = r.char_start - end;
+      if (text && gap >= 2) text += '\n\n';
+      else if (text && gap === 1) text += '\n';
+      text += r.text;
+      end = r.char_end;
+    }
+    return text;
+  }
+
+  function countChapterChunks(chapterId: string): number {
+    return (getDb().prepare('SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=?').get(chapterId) as unknown as { n: number }).n;
+  }
 
   /**
    * Replace a chapter's text: re-splits it into fresh parts (book's chunk
@@ -442,7 +585,9 @@ export function registerRoutes(app: FastifyInstance): void {
     db.prepare('DELETE FROM chunks WHERE chapter_id=?').run(chapterId);
 
     const book = db.prepare('SELECT max_chunk_chars FROM books WHERE id=?').get(id) as unknown as { max_chunk_chars: number };
-    const chunkCount = rechunkChapterText(chapterId, id, text, book.max_chunk_chars);
+    // per-chapter override wins over the book default
+    const chunkSize = chapter.max_chunk_chars ?? book.max_chunk_chars;
+    const chunkCount = rechunkChapterText(chapterId, id, text, chunkSize);
     queue.refreshBookStatus(id);
     bus.emit('event', { type: 'book.update', bookId: id });
     return { ok: true, chunkCount };
@@ -462,6 +607,7 @@ export function registerRoutes(app: FastifyInstance): void {
   /** Generate only the given chapter's pending chunks (a chapter-scoped job). */
   app.post('/api/books/:id/chapters/:chapterId/generate', async (req, reply) => {
     const { id, chapterId } = req.params as { id: string; chapterId: string };
+    const body = (req.body ?? {}) as { regenerate?: boolean };
     const db = getDb();
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(id) as unknown as BookRow | undefined;
     if (!book) return reply.code(404).send({ error: 'book not found' });
@@ -470,7 +616,7 @@ export function registerRoutes(app: FastifyInstance): void {
       .prepare('SELECT id FROM chapters WHERE id=? AND book_id=?')
       .get(chapterId, id) as unknown as { id: string } | undefined;
     if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
-    const result = queue.startBook(id, chapterId);
+    const result = queue.startBook(id, chapterId, { regenerate: body.regenerate === true });
     if ('error' in result) return reply.code(409).send(result);
     return result;
   });
@@ -503,13 +649,13 @@ export function registerRoutes(app: FastifyInstance): void {
       .get(chapterId, id) as unknown as ChapterRow | undefined;
     if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
     const chunks = db
-      .prepare("SELECT * FROM chunks WHERE chapter_id=? AND status='done' AND audio_path IS NOT NULL ORDER BY idx")
+      .prepare("SELECT * FROM chunks WHERE chapter_id=? AND status='done' AND disabled=0 AND audio_path IS NOT NULL ORDER BY idx")
       .all(chapterId) as unknown as ChunkRow[];
     if (chunks.length === 0) return reply.code(409).send({ error: 'no generated audio in this chapter' });
-    const total = db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=?').get(chapterId) as unknown as { n: number };
+    const total = db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=? AND disabled=0').get(chapterId) as unknown as { n: number };
 
     try {
-      const assembled = await assembleChapter(chapterId, chunks.map((c) => c.audio_path!));
+      const assembled = await assembleChapter(chapterId, chunks.map(toAssemblyChunk), { targetPauseMs: voicePauseTargetMs(db, id) });
       fs.mkdirSync(paths.exports, { recursive: true });
       const safe = `${book.title} - ${chapter.title}`
         .replace(/[\\/:*?"<>|]+/g, '_')
@@ -555,13 +701,24 @@ export function registerRoutes(app: FastifyInstance): void {
     const db = getDb();
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(id) as unknown as BookRow | undefined;
     if (!book) return reply.code(404).send({ error: 'book not found' });
+    // optional new book-level part size — rechunk IS the explicit action that
+    // may change it (PATCH refuses while audio exists; this is the escape hatch)
+    const body = (req.body ?? {}) as { maxChunkChars?: unknown };
+    let size = book.max_chunk_chars;
+    if (body.maxChunkChars !== undefined && body.maxChunkChars !== null) {
+      size = clampInt(Number(body.maxChunkChars), 60, 2000);
+      if (size !== book.max_chunk_chars) {
+        db.prepare('UPDATE books SET max_chunk_chars=?, updated_at=? WHERE id=?').run(size, new Date().toISOString(), id);
+        book.max_chunk_chars = size;
+      }
+    }
     // rechunking deletes all chunk rows — never while a generation job is live
     const activeJob = db
       .prepare("SELECT id FROM jobs WHERE book_id=? AND state IN ('running','paused')")
       .get(id) as unknown as { id: string } | undefined;
     if (activeJob) return reply.code(409).send({ error: 'generation is active — pause or cancel it before rechunking' });
     try {
-      rechunkBook(id, book.max_chunk_chars);
+      rechunkBook(id, size);
     } catch (err) {
       return reply.code(500).send({ error: `rechunk failed: ${err instanceof Error ? err.message : String(err)}` });
     }
@@ -578,11 +735,11 @@ export function registerRoutes(app: FastifyInstance): void {
       | undefined;
     if (!chapter) return reply.code(404).send({ error: 'chapter not found' });
     const chunks = db
-      .prepare("SELECT audio_path FROM chunks WHERE chapter_id=? AND status='done' ORDER BY idx")
-      .all(chapterId) as unknown as Array<{ audio_path: string | null }>;
-    const pathsList = chunks.map((c) => c.audio_path).filter((p): p is string => Boolean(p));
+      .prepare("SELECT audio_path, text, char_start, char_end FROM chunks WHERE chapter_id=? AND status='done' AND disabled=0 ORDER BY idx")
+      .all(chapterId) as unknown as Array<{ audio_path: string | null; text: string; char_start: number; char_end: number }>;
+    const pathsList = chunks.filter((c): c is { audio_path: string; text: string; char_start: number; char_end: number } => Boolean(c.audio_path));
     if (pathsList.length === 0) return reply.code(404).send({ error: 'no generated audio for this chapter' });
-    const { path: wavPath } = await assembleChapter(chapterId, pathsList);
+    const { path: wavPath } = await assembleChapter(chapterId, pathsList.map(toAssemblyChunk), { targetPauseMs: voicePauseTargetMs(db, id) });
     return reply.type('audio/wav').send(fs.createReadStream(wavPath));
   });
 
@@ -592,20 +749,21 @@ export function registerRoutes(app: FastifyInstance): void {
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(id) as unknown as BookRow | undefined;
     if (!book) return reply.code(404).send({ error: 'book not found' });
     const chapters = db.prepare('SELECT * FROM chapters WHERE book_id=? ORDER BY idx').all(id) as unknown as ChapterRow[];
-    const assembled: Array<{ chapterId: string; title: string; chunkPaths: string[]; durationMs: number }> = [];
+    const assembled: Array<{ chapterId: string; title: string; chunks: AssemblyChunk[]; durationMs: number }> = [];
     for (const chapter of chapters) {
       const chunks = db
-        .prepare("SELECT audio_path FROM chunks WHERE chapter_id=? AND status='done' ORDER BY idx")
-        .all(chapter.id) as unknown as Array<{ audio_path: string | null }>;
-      const chunkPaths = chunks.map((c) => c.audio_path).filter((p): p is string => Boolean(p));
+        .prepare("SELECT audio_path, text, char_start, char_end FROM chunks WHERE chapter_id=? AND status='done' AND disabled=0 ORDER BY idx")
+        .all(chapter.id) as unknown as Array<{ audio_path: string | null; text: string; char_start: number; char_end: number }>;
+      const chunkPaths = chunks.filter((c): c is { audio_path: string; text: string; char_start: number; char_end: number } => Boolean(c.audio_path));
       if (chunkPaths.length === 0) continue;
       const done = db
-        .prepare("SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=? AND status='done'")
+        .prepare("SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=? AND status='done' AND disabled=0")
         .get(chapter.id) as unknown as { n: number };
-      const total = db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=?').get(chapter.id) as unknown as { n: number };
+      const total = db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE chapter_id=? AND disabled=0').get(chapter.id) as unknown as { n: number };
       if (done.n !== total.n) continue; // skip partially generated chapters
-      const a = await assembleChapter(chapter.id, chunkPaths);
-      assembled.push({ chapterId: chapter.id, title: chapter.title, chunkPaths, durationMs: a.durationMs });
+      const items = chunkPaths.map(toAssemblyChunk);
+      const a = await assembleChapter(chapter.id, items, { targetPauseMs: voicePauseTargetMs(db, id) });
+      assembled.push({ chapterId: chapter.id, title: chapter.title, chunks: items, durationMs: a.durationMs });
     }
     if (assembled.length === 0) return reply.code(409).send({ error: 'no complete chapters to export' });
     try {
@@ -615,7 +773,7 @@ export function registerRoutes(app: FastifyInstance): void {
       const qaRows: Array<{ idx: number; chapterTitle?: string; qa: StoredQa }> = [];
       for (const a of assembled) {
         const chunks = db
-          .prepare("SELECT * FROM chunks WHERE chapter_id=? AND status='done' AND audio_path IS NOT NULL ORDER BY idx")
+          .prepare("SELECT * FROM chunks WHERE chapter_id=? AND status='done' AND disabled=0 AND audio_path IS NOT NULL ORDER BY idx")
           .all(a.chapterId) as unknown as ChunkRow[];
         for (const c of chunks) {
           qaRows.push({ idx: qaRows.length + 1, chapterTitle: a.title, qa: await qaChunkWithCache(c, language) });
@@ -872,13 +1030,24 @@ export function registerRoutes(app: FastifyInstance): void {
   /** Edit a part's text. Audio generated for the old text is dropped (status → pending). */
   app.patch('/api/chunks/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const body = (req.body ?? {}) as { text?: string };
-    const text = (body.text ?? '').replace(/\r\n/g, '\n').trim();
-    if (!text) return reply.code(400).send({ error: 'text is required' });
-    if (text.length > 8000) return reply.code(413).send({ error: 'part text too long (max 8000 chars) — edit the chapter instead' });
+    const body = (req.body ?? {}) as { text?: string; disabled?: boolean };
     const db = getDb();
     const chunk = db.prepare('SELECT * FROM chunks WHERE id=?').get(id) as unknown as ChunkRow | undefined;
     if (!chunk) return reply.code(404).send({ error: 'chunk not found' });
+
+    // flag-only toggle: no audio drop, no status reset — disabling is not a text edit
+    if (body.text === undefined) {
+      if (typeof body.disabled !== 'boolean') return reply.code(400).send({ error: 'text or disabled is required' });
+      db.prepare('UPDATE chunks SET disabled=? WHERE id=?').run(body.disabled ? 1 : 0, id);
+      queue.refreshBookStatus(chunk.book_id);
+      bus.emit('event', { type: 'chunk.update', bookId: chunk.book_id, chapterId: chunk.chapter_id, chunkId: id, status: chunk.status, durationMs: chunk.duration_ms });
+      bus.emit('event', { type: 'book.update', bookId: chunk.book_id });
+      return { ok: true, changed: true };
+    }
+
+    const text = (body.text ?? '').replace(/\r\n/g, '\n').trim();
+    if (!text) return reply.code(400).send({ error: 'text is required' });
+    if (text.length > 8000) return reply.code(413).send({ error: 'part text too long (max 8000 chars) — edit the chapter instead' });
     if (chunk.status === 'generating') return reply.code(409).send({ error: 'part is generating right now — wait or pause first' });
     if (text === chunk.text.trim()) return { ok: true, changed: false };
 
@@ -918,7 +1087,9 @@ export function registerRoutes(app: FastifyInstance): void {
 
   // ---------- voices ----------
   app.get('/api/voices', async () => {
-    return getDb().prepare('SELECT id, name, reference_text, synth_options, created_at FROM voices ORDER BY name').all();
+    return getDb()
+      .prepare('SELECT id, name, reference_text, synth_options, pause_target_ms, created_at FROM voices ORDER BY name')
+      .all();
   });
 
   app.post('/api/voices', async (req, reply) => {
@@ -959,12 +1130,12 @@ export function registerRoutes(app: FastifyInstance): void {
 
   app.patch('/api/voices/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const body = (req.body ?? {}) as { name?: string; referenceText?: string; synthOptions?: unknown };
+    const body = (req.body ?? {}) as { name?: string; referenceText?: string; synthOptions?: unknown; pauseTargetMs?: number | null };
     const db = getDb();
     const voice = db.prepare('SELECT * FROM voices WHERE id=?').get(id) as unknown as VoiceRow | undefined;
     if (!voice) return reply.code(404).send({ error: 'voice not found' });
 
-    const next: { name?: string; reference_text?: string; synth_options?: string | null } = {};
+    const next: Record<string, string | number | null> = {};
     if (body.name !== undefined) {
       const name = String(body.name).trim();
       if (!name) return reply.code(400).send({ error: 'name cannot be empty' });
@@ -982,15 +1153,22 @@ export function registerRoutes(app: FastifyInstance): void {
         next.synth_options = Object.keys(options).length > 0 ? JSON.stringify(options) : null;
       }
     }
+    if (body.pauseTargetMs !== undefined) {
+      // standard sentence pause for this voice's books; null = follow global settings
+      next.pause_target_ms =
+        body.pauseTargetMs === null ? null : clampInt(Number(body.pauseTargetMs), 100, 2000);
+    }
 
     const keys = Object.keys(next);
     if (keys.length > 0) {
       const sets = keys.map((k) => `${k}=?`).join(', ');
-      const values = keys.map((k) => String((next as Record<string, string>)[k]));
+      const values = keys.map((k) => next[k] as string | number | null);
       db.prepare(`UPDATE voices SET ${sets} WHERE id=?`).run(...values, id);
       bus.emit('event', { type: 'voices.update' });
     }
-    const row = db.prepare('SELECT id, name, reference_text, synth_options, created_at FROM voices WHERE id=?').get(id) as unknown as { synth_options: string | null };
+    const row = db
+      .prepare('SELECT id, name, reference_text, synth_options, pause_target_ms, created_at FROM voices WHERE id=?')
+      .get(id) as unknown as { synth_options: string | null; pause_target_ms: number | null };
     return { ...row, synthOptions: row.synth_options ? JSON.parse(row.synth_options) : null };
   });
 
@@ -1052,6 +1230,7 @@ export function registerRoutes(app: FastifyInstance): void {
     let start = 0;
     let end: number | null = null;
     let normalize = true;
+    let denoise = true;
     for await (const part of parts) {
       if (part.type === 'file' && part.fieldname === 'file') {
         fileBuf = await part.toBuffer();
@@ -1060,6 +1239,7 @@ export function registerRoutes(app: FastifyInstance): void {
         if (part.fieldname === 'start') start = Math.max(0, Number(part.value) || 0);
         if (part.fieldname === 'end' && part.value !== '') end = Math.max(0, Number(part.value));
         if (part.fieldname === 'normalize') normalize = part.value === 'true';
+        if (part.fieldname === 'denoise') denoise = part.value === 'true';
       }
     }
     if (!fileBuf) return reply.code(400).send({ error: 'file is required' });
@@ -1068,7 +1248,11 @@ export function registerRoutes(app: FastifyInstance): void {
     const tmpOut = path.join(paths.data, `prep-${randomUUID()}.wav`);
     fs.writeFileSync(tmpIn, fileBuf);
     try {
-      const filters = ['silenceremove=start_periods=1:start_threshold=-45dB'];
+      // denoise BEFORE the trim: dropping the noise floor first lets the fixed
+      // −45 dB silence trim actually fire on noisy sources (old videos etc.)
+      const filters: string[] = [];
+      if (denoise) filters.push('highpass=f=70', 'afftdn=nr=12:nf=-25');
+      filters.push('silenceremove=start_periods=1:start_threshold=-45dB');
       if (normalize) filters.push('loudnorm=I=-20:TP=-1.5:LRA=7');
       const args = ['-y', '-i', tmpIn];
       if (end !== null && end > start) args.push('-ss', String(start), '-to', String(end));
@@ -1386,6 +1570,8 @@ interface BookSummary extends BookRow {
   chunks_failed: number;
   duration_ms: number;
   voice_name: string | null;
+  /** jobs in running/paused/queued state — a canceled/paused book with none left has stopped work */
+  open_jobs: number;
 }
 
 interface ChapterSummary extends ChapterRow {
@@ -1407,6 +1593,19 @@ function clampNum(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(v) ? v : min));
 }
 
+/** Chunk row → assembly input (keeps boundary metadata for gap placement). */
+function toAssemblyChunk(c: { audio_path: string | null; text: string; char_start: number; char_end: number }): AssemblyChunk {
+  return { path: c.audio_path!, text: c.text, charStart: c.char_start, charEnd: c.char_end };
+}
+
+/** Per-voice standard pause (voices.pause_target_ms); undefined → global default. */
+function voicePauseTargetMs(db: DatabaseSync, bookId: string): number | undefined {
+  const row = db
+    .prepare('SELECT v.pause_target_ms AS ms FROM books b JOIN voices v ON v.id=b.voice_id WHERE b.id=?')
+    .get(bookId) as unknown as { ms: number | null } | undefined;
+  return row?.ms != null ? row.ms : undefined;
+}
+
 /** Re-split one chapter's (new) text into chunks; returns the chunk count. */
 function rechunkChapterText(chapterId: string, bookId: string, text: string, maxChunkChars: number): number {
   const db = getDb();
@@ -1420,14 +1619,20 @@ function rechunkChapterText(chapterId: string, bookId: string, text: string, max
   return chunks.length;
 }
 
-function insertChaptersAndChunks(bookId: string, chapters: Array<{ title: string; text: string }>, maxChunkChars: number): void {
+function insertChaptersAndChunks(
+  bookId: string,
+  chapters: Array<{ title: string; text: string }>,
+  maxChunkChars: number,
+  overrides: Map<number, number> = new Map(),
+): void {
   const db = getDb();
   chapters.forEach((chapter, ci) => {
     const chapterId = randomUUID();
-    db.prepare('INSERT INTO chapters (id, book_id, idx, title, char_count) VALUES (?,?,?,?,?)').run(
-      chapterId, bookId, ci, chapter.title, chapter.text.length,
+    const override = overrides.get(ci) ?? null;
+    db.prepare('INSERT INTO chapters (id, book_id, idx, title, char_count, max_chunk_chars) VALUES (?,?,?,?,?,?)').run(
+      chapterId, bookId, ci, chapter.title, chapter.text.length, override,
     );
-    const chunks = chunkText(chapter.text, maxChunkChars);
+    const chunks = chunkText(chapter.text, override ?? maxChunkChars);
     chunks.forEach((chunk, ki) => {
       db.prepare(
         'INSERT INTO chunks (id, book_id, chapter_id, idx, text, char_start, char_end, status) VALUES (?,?,?,?,?,?,?,?)',
@@ -1453,9 +1658,20 @@ function rechunkBook(bookId: string, maxChunkChars: number): void {
   } else {
     chapters = splitTxtChapters(raw.toString('utf8'));
   }
+  // per-chapter chunk-size overrides survive a re-chunk (matched by position)
+  const overrides = new Map<number, number>();
+  for (const c of db
+    .prepare('SELECT idx, max_chunk_chars FROM chapters WHERE book_id=? AND max_chunk_chars IS NOT NULL')
+    .all(bookId) as unknown as Array<{ idx: number; max_chunk_chars: number }>) {
+    overrides.set(c.idx, c.max_chunk_chars);
+  }
+  // chunk text is replaced — drop the generated audio with it (rows + files)
+  for (const o of db.prepare('SELECT audio_path FROM chunks WHERE book_id=? AND audio_path IS NOT NULL').all(bookId) as unknown as Array<{ audio_path: string }>) {
+    fs.rmSync(o.audio_path, { force: true });
+  }
   db.prepare('DELETE FROM chunks WHERE book_id=?').run(bookId);
   db.prepare('DELETE FROM chapters WHERE book_id=?').run(bookId);
-  insertChaptersAndChunks(bookId, chapters, maxChunkChars);
+  insertChaptersAndChunks(bookId, chapters, maxChunkChars, overrides);
 }
 
 interface WordQaSummary {

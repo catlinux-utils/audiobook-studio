@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, type ExportRow } from '../lib/api';
-import { Button, formatDuration } from '../components/bits';
+import { Banner, Button, Card, Input, QaPill, formatDuration } from '../components/bits';
 
 /** Every export across all books, with Discord-friendly compression. */
 export default function Exports() {
@@ -67,8 +67,8 @@ export default function Exports() {
         <h1 className="text-2xl font-semibold">Exports</h1>
         <Button variant="ghost" onClick={refresh}>↺ refresh</Button>
       </div>
-      {error && <div className="mb-4 rounded-lg bg-red-950 border border-red-800 text-red-200 px-4 py-2 text-sm">{error}</div>}
-      {note && <div className="mb-4 rounded-lg bg-emerald-950 border border-emerald-800 text-emerald-200 px-4 py-2 text-sm">✓ {note}</div>}
+      {error && <Banner kind="error" className="mb-4">{error}</Banner>}
+      {note && <Banner kind="success" className="mb-4">✓ {note}</Banner>}
 
       {rows.length === 0 && (
         <div className="rounded-xl border border-dashed border-zinc-700 p-10 text-center text-zinc-400">
@@ -82,7 +82,7 @@ export default function Exports() {
           const kbps = estimateKbps(x, targetMB);
           const feasible = kbps >= 16;
           return (
-            <div key={x.id} className="rounded-xl bg-zinc-900 border border-zinc-800 p-3">
+            <Card key={x.id} className="p-3!">
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <span className="text-zinc-400 uppercase text-xs w-9">{x.format}</span>
                 <span className="font-medium truncate max-w-[380px]" title={x.path}>{x.path.split(/[\\/]/).pop()}</span>
@@ -92,37 +92,29 @@ export default function Exports() {
                 <span className="text-xs text-zinc-500">
                   {x.chapterCount} ch · {formatDuration(x.durationMs)} · {x.sizeBytes !== null ? mb(x.sizeBytes) : 'missing'}
                 </span>
-                {x.qaSummary && (
-                  <span
-                    className={`text-xs rounded px-1.5 py-0.5 border ${
-                      x.qaSummary.flagged > 0
-                        ? 'bg-amber-950/60 border-amber-900 text-amber-300'
-                        : 'bg-emerald-950/60 border-emerald-900 text-emerald-300'
-                    }`}
-                    title={`${x.qaSummary.missingWords} missing word(s) · WER ${(100 * (x.qaSummary.wer ?? 0)).toFixed(1)}%`}
-                  >
-                    QA {x.qaSummary.checked - x.qaSummary.flagged}/{x.qaSummary.checked} clean
-                  </span>
-                )}
+                {x.qaSummary && <QaPill qa={x.qaSummary} />}
                 <span className="ml-auto flex items-center gap-2">
                   <a href={`/api/exports/${x.id}/download`} className="text-emerald-400 hover:underline">⬇ download</a>
                   {x.qaSummary && (
                     <a href={`/api/exports/${x.id}/report`} target="_blank" rel="noreferrer" className="text-sky-400 hover:underline text-xs">QA report</a>
                   )}
-                  <button
-                    className="text-red-400 hover:underline"
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="text-red-400"
                     disabled={busyId === x.id}
                     onClick={() => removeExport(x)}
                     title="delete the file from disk and remove it from the list"
                   >
                     🗑
-                  </button>
+                  </Button>
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-zinc-500">
                 <span>compress for Discord:</span>
-                <input
-                  className="w-16 rounded bg-zinc-800 border border-zinc-700 px-2 py-0.5 text-xs"
+                <Input
+                  size="sm"
+                  className="w-16"
                   value={targets[x.id] ?? '20'}
                   onChange={(e) => setTargets((t) => ({ ...t, [x.id]: e.target.value }))}
                   title="target size in MB"
@@ -143,7 +135,7 @@ export default function Exports() {
                   <span className="text-emerald-500">already under {targetMB} MB</span>
                 )}
               </div>
-            </div>
+            </Card>
           );
         })}
       </div>

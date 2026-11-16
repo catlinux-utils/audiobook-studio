@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { getDb, type BookRow, type ChunkRow } from '../db.js';
 import { expertOptionsToRequest, type ExpertRequestFields, type ExpertOptions } from './voiceOptions.js';
 import { paths, loadSettings } from '../config.js';
+import { speakableCase } from '../text/speakable.js';
 import { ttsBaseUrl } from './managed.js';
 import { AudioCppClient, ServerBusyError, TtsRequestError } from './audiocpp.js';
 import { readWavInfo } from '../audio/wavmeta.js';
@@ -57,9 +58,12 @@ export class TtsQueue {
    * Queue work for a book: either the whole book (chapterId omitted) or one
    * chapter. Chapter requests join a FIFO chapter queue — they run one after
    * another as the worker frees up; several chapters can wait at once.
+   * With `regenerate` the whole chapter is re-queued: already-done parts are
+   * redone too (same mechanism as explicit chunk selections).
    */
-  startBook(bookId: string, chapterId?: string): { jobId: string } | { error: string } {
+  startBook(bookId: string, chapterId?: string, opts?: { regenerate?: boolean }): { jobId: string } | { error: string } {
     const db = getDb();
+    const regenerate = opts?.regenerate === true;
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(bookId) as unknown as BookRow | undefined;
     if (!book) return { error: 'book not found' };
 
@@ -73,9 +77,16 @@ export class TtsQueue {
     if (!chapter) return { error: 'chapter not found' };
 
     const pending = db
-      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND chapter_id=? AND status IN ('pending','failed')")
+      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND chapter_id=? AND status IN ('pending','failed') AND disabled=0")
       .get(bookId, chapterId) as unknown as { n: number };
-    if (pending.n === 0) return { error: 'this chapter has no pending chunks' };
+    if (pending.n === 0 && !regenerate) return { error: 'this chapter has no pending chunks' };
+
+    const regenerateChunks = regenerate
+      ? (db
+          .prepare("SELECT id FROM chunks WHERE book_id=? AND chapter_id=? AND status!='generating' AND disabled=0")
+          .all(bookId, chapterId) as unknown as Array<{ id: string }>)
+      : [];
+    if (regenerate && regenerateChunks.length === 0) return { error: 'this chapter has no chunks to regenerate' };
 
     // an open book-wide job (no chapter, no explicit chunk list) covers everything
     const bookWide = db
@@ -119,9 +130,19 @@ export class TtsQueue {
     const state = running.n > 0 ? 'queued' : 'running';
     const jobId = randomUUID();
     const now = new Date().toISOString();
+    const total = regenerate ? regenerateChunks.length : pending.n;
     db.prepare(
       'INSERT INTO jobs (id, book_id, chapter_id, state, total_chunks, done_chunks, failed_chunks, created_at, started_at) VALUES (?,?,?,?,?,?,?,?,?)',
-    ).run(jobId, bookId, chapterId, state, pending.n, 0, 0, now, state === 'running' ? now : null);
+    ).run(jobId, bookId, chapterId, state, total, 0, 0, now, state === 'running' ? now : null);
+
+    if (regenerate) {
+      const insertChunk = db.prepare('INSERT OR IGNORE INTO job_chunks (job_id, chunk_id) VALUES (?,?)');
+      for (const c of regenerateChunks) insertChunk.run(jobId, c.id);
+      db.prepare("UPDATE chunks SET status='pending', error=NULL WHERE book_id=? AND chapter_id=? AND status='done'").run(
+        bookId,
+        chapterId,
+      );
+    }
 
     // failed chunks of this chapter become retryable when its job starts
     db.prepare("UPDATE chunks SET status='pending', error=NULL WHERE book_id=? AND chapter_id=? AND status='failed'").run(
@@ -138,9 +159,9 @@ export class TtsQueue {
   private startBookWide(bookId: string): { jobId: string } | { error: string } {
     const db = getDb();
     const pending = db
-      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND status IN ('pending','failed')")
+      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE book_id=? AND status IN ('pending','failed') AND disabled=0")
       .get(bookId) as unknown as { n: number };
-    if (pending.n === 0) return { error: 'no pending chunks' };
+    if (pending.n === 0) return { error: 'no pending chunks (disabled parts are skipped)' };
 
     const openBookWide = db
       .prepare(
@@ -189,8 +210,10 @@ export class TtsQueue {
   private closeJob(jobId: string, state: 'canceled' | 'done' | 'paused'): void {
     getDb()
       .prepare(
+        // started_at is NULL for paused/queued jobs (wall time already banked
+        // at pause time) — COALESCE keeps the increment from NULLing wall_ms
         `UPDATE jobs SET state=?, finished_at=?,
-           wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
+           wall_ms = wall_ms + COALESCE(CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER), 0),
            started_at = NULL
          WHERE id=?`,
       )
@@ -205,8 +228,8 @@ export class TtsQueue {
         `SELECT
            (SELECT COUNT(*) FROM jobs WHERE book_id=? AND state='running') AS running,
            (SELECT COUNT(*) FROM jobs WHERE book_id=? AND state='queued') AS queued,
-           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status IN ('pending','generating')) AS pending,
-           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status='failed') AS failed`,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status IN ('pending','generating') AND disabled=0) AS pending,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? AND status='failed' AND disabled=0) AS failed`,
       )
       .get(bookId, bookId, bookId, bookId) as unknown as {
       running: number;
@@ -236,7 +259,7 @@ export class TtsQueue {
       if (j.state === 'running') this.pausedJobs.add(j.id);
       db.prepare(
         `UPDATE jobs SET state='paused',
-           wall_ms = wall_ms + CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER),
+           wall_ms = wall_ms + COALESCE(CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER), 0),
            started_at = NULL
          WHERE id=?`,
       ).run(j.id);
@@ -281,6 +304,11 @@ export class TtsQueue {
     this.regenQueue.set(chunkId, seed);
     this.pump();
     return { ok: true };
+  }
+
+  /** Chunk ids waiting for priority regeneration (shown as "queued" in the UI). */
+  regenQueuedIds(): string[] {
+    return [...this.regenQueue.keys()];
   }
 
   private pump(): void {
@@ -357,10 +385,11 @@ export class TtsQueue {
     const unique = [...new Set(chunkIds)];
     const placeholders = unique.map(() => '?').join(',');
     const chunks = db
-      .prepare(`SELECT id, status FROM chunks WHERE book_id=? AND id IN (${placeholders})`)
-      .all(bookId, ...unique) as unknown as Array<{ id: string; status: string }>;
+      .prepare(`SELECT id, status, disabled FROM chunks WHERE book_id=? AND id IN (${placeholders})`)
+      .all(bookId, ...unique) as unknown as Array<{ id: string; status: string; disabled: number }>;
     if (chunks.length === 0) return { error: 'no such chunks in this book' };
     if (chunks.length < unique.length) return { error: 'some selected chunks do not belong to this book' };
+    if (chunks.some((c) => c.disabled)) return { error: 'some selected parts are disabled — enable them first' };
 
     const bookWide = db
       .prepare(
@@ -441,7 +470,7 @@ export class TtsQueue {
             .prepare(
               `SELECT k.* FROM chunks k
                JOIN job_chunks jc ON jc.chunk_id=k.id AND jc.job_id=?
-               WHERE k.book_id=? AND k.status='pending'
+               WHERE k.book_id=? AND k.status='pending' AND k.disabled=0
                ORDER BY (SELECT idx FROM chapters WHERE id=k.chapter_id) ASC, k.idx ASC
                LIMIT 1`,
             )
@@ -450,7 +479,7 @@ export class TtsQueue {
           ? (db
               .prepare(
                 `SELECT * FROM chunks
-                 WHERE book_id=? AND chapter_id=? AND status='pending'
+                 WHERE book_id=? AND chapter_id=? AND status='pending' AND disabled=0
                  ORDER BY (SELECT idx FROM chapters WHERE id=chunks.chapter_id) ASC, idx ASC
                  LIMIT 1`,
               )
@@ -458,7 +487,7 @@ export class TtsQueue {
           : (db
               .prepare(
                 `SELECT * FROM chunks
-                 WHERE book_id=? AND status='pending'
+                 WHERE book_id=? AND status='pending' AND disabled=0
                  ORDER BY (SELECT idx FROM chapters WHERE id=chunks.chapter_id) ASC, idx ASC
                  LIMIT 1`,
               )
@@ -538,7 +567,7 @@ export class TtsQueue {
       this.aborters.set(chunk.id, aborter);
       try {
         const candidate = await this.client.synthesize({
-          input: chunk.text,
+          input: speakableCase(chunk.text),
           language: book.language || undefined,
           voiceRefBase64,
           referenceText,
@@ -640,8 +669,8 @@ export class TtsQueue {
     const counts = db
       .prepare(
         `SELECT
-           (SELECT COUNT(*) FROM chunks WHERE book_id=? ${scopeFilter} AND status IN ('pending','generating')) AS pending,
-           (SELECT COUNT(*) FROM chunks WHERE book_id=? ${scopeFilter} AND status='failed') AS failed`,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? ${scopeFilter} AND status IN ('pending','generating') AND disabled=0) AS pending,
+           (SELECT COUNT(*) FROM chunks WHERE book_id=? ${scopeFilter} AND status='failed' AND disabled=0) AS failed`,
       )
       .get(...scopeArgs) as unknown as { pending: number; failed: number };
     if (counts.pending > 0) return;
@@ -660,9 +689,9 @@ export class TtsQueue {
     const job = db
       .prepare(
         `SELECT id, state, chapter_id,
-           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=jobs.book_id AND ${scopeSql}) AS total,
-           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=jobs.book_id AND k.status='done' AND ${scopeSql}) AS done,
-           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=jobs.book_id AND k.status='failed' AND ${scopeSql}) AS failed
+           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=jobs.book_id AND ${scopeSql} AND k.disabled=0) AS total,
+           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=jobs.book_id AND k.status='done' AND ${scopeSql} AND k.disabled=0) AS done,
+           (SELECT COUNT(*) FROM chunks k WHERE k.book_id=jobs.book_id AND k.status='failed' AND ${scopeSql} AND k.disabled=0) AS failed
          FROM jobs WHERE book_id=? ORDER BY created_at DESC LIMIT 1`,
       )
       .get(bookId) as

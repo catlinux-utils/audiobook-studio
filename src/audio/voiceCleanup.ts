@@ -33,6 +33,8 @@ export interface CleanupOptions {
   fadeOutSec?: number;
   /** trim leading/trailing silence */
   trimSilence?: boolean;
+  /** compress internal pauses longer than this many seconds (0/empty = off) */
+  shortenPauses?: number;
 }
 
 function clamp(n: unknown, min: number, max: number, fallback: number): number {
@@ -46,6 +48,9 @@ function clamp(n: unknown, min: number, max: number, fallback: number): number {
 export function buildCleanupFilters(o: CleanupOptions): string {
   const filters: string[] = [];
   if (o.trimSilence) filters.push('silenceremove=start_periods=1:start_threshold=-45dB');
+  if (o.shortenPauses && Number(o.shortenPauses) > 0) {
+    filters.push(`silenceremove=stop_periods=-1:stop_duration=${clamp(o.shortenPauses, 0.05, 2, 0.35)}:stop_threshold=-40dB`);
+  }
   if (o.highpassHz && Number(o.highpassHz) > 0) filters.push(`highpass=f=${clamp(o.highpassHz, 20, 500, 80)}`);
   if (o.lowpassHz && Number(o.lowpassHz) > 0) filters.push(`lowpass=f=${clamp(o.lowpassHz, 4000, 20000, 12000)}`);
   if (o.denoiseStrength && Number(o.denoiseStrength) > 0) {

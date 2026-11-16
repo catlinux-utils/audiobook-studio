@@ -4,7 +4,7 @@ import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import { api, onStudioEvent, type CloneTest, type Voice } from '../lib/api';
 import AlignPanel from '../components/AlignPanel';
-import { Button } from '../components/bits';
+import { Banner, Button, Card, Checkbox, Input, Textarea, WordChip } from '../components/bits';
 
 /**
  * Voice preparation studio:
@@ -21,10 +21,13 @@ export default function Voices() {
   const [previewText, setPreviewText] = useState('To jest krótki przykład głosu narratora. Dzień dobry, witaj w audiobookach.');
   const [language, setLanguage] = useState('');
   const [normalize, setNormalize] = useState(true);
+  const [denoise, setDenoise] = useState(true);
   const [stage, setStage] = useState<'idle' | 'source' | 'prepared'>('idle');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [selectionLabel, setSelectionLabel] = useState<string | null>(null);
+  const [hasSelection, setHasSelection] = useState(false);
+  const [playingSelection, setPlayingSelection] = useState(false);
   const [previewingId, setPreviewingId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const waveRef = useRef<HTMLDivElement>(null);
@@ -70,16 +73,26 @@ export default function Voices() {
       const onRegion = (r: { id: string; start: number; end: number }) => {
         for (const other of regions.getRegions()) if (other.id !== r.id) other.remove();
         setSelectionLabel(`selected ${r.start.toFixed(1)}–${r.end.toFixed(1)} s (${(r.end - r.start).toFixed(1)} s)`);
+        setHasSelection(true);
       };
       regions.on('region-created', onRegion);
       regions.on('region-updated', onRegion);
+      regions.on('region-removed', () => {
+        setHasSelection(regions.getRegions().length > 0);
+        setSelectionLabel(null);
+      });
       regionsRef.current = regions;
     }
+    // keep the listen-to-selection button label in sync with playback state
+    ws.on('play', () => setPlayingSelection(true));
+    ws.on('pause', () => setPlayingSelection(false));
+    ws.on('finish', () => setPlayingSelection(false));
     wsRef.current = ws;
     return () => {
       ws.destroy();
       wsRef.current = null;
       regionsRef.current = null;
+      setPlayingSelection(false);
     };
   }, [stage]);
 
@@ -98,6 +111,19 @@ export default function Voices() {
     return { start: r.start, end: r.end };
   };
 
+  /** Play exactly the selected segment — region.play() bounds playback to start..end. */
+  const playSelection = () => {
+    const ws = wsRef.current;
+    if (!ws) return;
+    if (ws.isPlaying()) {
+      ws.pause();
+      return;
+    }
+    const r = regionsRef.current?.getRegions()[0];
+    if (!r) return;
+    r.play(true); // stopAtEnd — without it playback runs to the end of the file
+  };
+
   const prepare = async () => {
     const file = sourceFileRef.current;
     if (!file) return;
@@ -110,6 +136,7 @@ export default function Voices() {
       form.append('start', String(start));
       form.append('end', end === null ? '' : String(end));
       form.append('normalize', String(normalize));
+      form.append('denoise', String(denoise));
       const res = await fetch('/api/voices/prepare', { method: 'POST', body: form });
       if (!res.ok) {
         const j = (await res.json().catch(() => ({}))) as { error?: string };
@@ -188,11 +215,10 @@ export default function Voices() {
   return (
     <div>
       <h1 className="text-2xl font-semibold mb-4">Voices</h1>
-      {error && <div className="mb-4 rounded-lg bg-red-950 border border-red-800 text-red-200 px-4 py-2 text-sm">{error}</div>}
+      {error && <Banner kind="error" className="mb-4">{error}</Banner>}
 
       {/* ---------- preparation studio ---------- */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4 mb-6">
-        <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide mb-3">Prepare a voice for cloning</h2>
+      <Card title="Prepare a voice for cloning" className="mb-6">
 
         <input
           ref={fileRef}
@@ -211,8 +237,20 @@ export default function Voices() {
                   <span className="text-zinc-400">
                     {selectionLabel ?? 'drag on the waveform to select a segment'} — 5–20 s of clean single-speaker speech is ideal
                   </span>
+                  <Button
+                    variant="ghost"
+                    disabled={!hasSelection}
+                    onClick={playSelection}
+                    title={hasSelection ? 'play only the selected segment' : 'drag on the waveform to select a segment first'}
+                  >
+                    {playingSelection ? '■ stop' : '▶ listen to selection'}
+                  </Button>
                   <label className="flex items-center gap-1.5 text-zinc-400">
-                    <input type="checkbox" checked={normalize} onChange={(e) => setNormalize(e.target.checked)} />
+                    <Checkbox checked={denoise} onChange={(e) => setDenoise(e.target.checked)} />
+                    reduce background noise
+                  </label>
+                  <label className="flex items-center gap-1.5 text-zinc-400" title="denoise first so the silence trim works on noisy sources">
+                    <Checkbox checked={normalize} onChange={(e) => setNormalize(e.target.checked)} />
                     normalize loudness
                   </label>
                   <Button variant="primary" disabled={busy !== ''} onClick={prepare}>
@@ -225,8 +263,9 @@ export default function Voices() {
                   <Button onClick={transcribe} disabled={busy !== ''}>
                     {busy === 'transcribe' ? 'transcribing…' : '🗣 Auto-transcribe'}
                   </Button>
-                  <input
-                    className="w-24 rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs"
+                  <Input
+                    size="sm"
+                    className="w-24"
                     placeholder="lang (auto)"
                     value={language}
                     onChange={(e) => setLanguage(e.target.value)}
@@ -244,14 +283,14 @@ export default function Voices() {
         <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-3 mt-4">
           <div>
             <label className="block text-xs text-zinc-400 mb-1">Voice name</label>
-            <input className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. narrator-2" />
+            <Input className="w-full" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. narrator-2" />
           </div>
           <div>
             <label className="block text-xs text-zinc-400 mb-1">
               Transcript <span className="text-zinc-600">(exact words in the clip — auto-filled by transcription)</span>
             </label>
-            <textarea
-              className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm min-h-[64px]"
+            <Textarea
+              className="w-full min-h-[64px]"
               value={referenceText}
               onChange={(e) => setReferenceText(e.target.value)}
               placeholder="Transcript of the reference audio…"
@@ -262,14 +301,14 @@ export default function Voices() {
           <Button variant="primary" disabled={stage !== 'prepared' || busy !== ''} onClick={save} title={stage !== 'prepared' ? 'prepare a clip first' : ''}>
             {busy === 'save' ? 'Saving…' : '💾 Save voice'}
           </Button>
-          <input
-            className="flex-1 rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm"
+          <Input
+            className="flex-1"
             value={previewText}
             onChange={(e) => setPreviewText(e.target.value)}
             title="text used for the saved-voice preview below"
           />
         </div>
-      </div>
+      </Card>
 
       {/* ---------- saved voices ---------- */}
       <div className="space-y-2">
@@ -302,6 +341,21 @@ function VoiceRow({
   const [name, setName] = useState(v.name);
   const [transcript, setTranscript] = useState(v.reference_text);
   const [saving, setSaving] = useState(false);
+  const [pauseMs, setPauseMs] = useState(v.pause_target_ms != null ? String(v.pause_target_ms) : '');
+
+  /** per-voice standard sentence pause; empty = follow global settings */
+  const savePause = async (raw: string) => {
+    const trimmed = raw.trim();
+    const val = trimmed === '' ? null : Number(trimmed);
+    if (val !== null && (!Number.isFinite(val) || val < 100 || val > 2000)) return;
+    if ((v.pause_target_ms ?? null) === val) return;
+    try {
+      await api.updateVoice(v.id, { pauseTargetMs: val });
+      onChanged();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   useEffect(() => {
     if (!editing) {
@@ -328,19 +382,19 @@ function VoiceRow({
   };
 
   return (
-    <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
+    <Card>
       <div className="flex items-start gap-4">
         <div className="flex-1 min-w-0">
           {editing ? (
             <div className="space-y-2">
-              <input
-                className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-sm font-medium"
+              <Input
+                className="w-full font-medium"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="voice name"
               />
-              <textarea
-                className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm min-h-[56px]"
+              <Textarea
+                className="w-full min-h-[56px]"
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
                 placeholder="transcript (exact words of the reference clip)"
@@ -358,6 +412,20 @@ function VoiceRow({
             <>
               <div className="font-medium">{v.name}</div>
               <div className="text-sm text-zinc-500 truncate">{v.reference_text || 'no transcript'}</div>
+              <div className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
+                <span title="standard sentence pause for this voice (ms) — in-take breaks and chunk joins are normalized to it; empty = automatic (follows the narration's own natural pause rhythm)">
+                  ⏸ breaks
+                </span>
+                <input
+                  className="w-16 rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 text-xs"
+                  value={pauseMs}
+                  placeholder="auto"
+                  onChange={(e) => setPauseMs(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && savePause(pauseMs)}
+                  onBlur={() => savePause(pauseMs)}
+                />
+                <span>ms</span>
+              </div>
             </>
           )}
         </div>
@@ -374,7 +442,7 @@ function VoiceRow({
             </Button>
             <Link
               to={`/voices/${v.id}/expert`}
-              className="inline-flex items-center rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 transition-colors"
+              className="inline-flex items-center rounded-lg bg-transparent hover:bg-zinc-800 text-zinc-300 px-3 py-1.5 text-sm font-medium transition-colors"
               title="expert mode: reference cleanup, full parameter bench, sweeps"
             >
               🧪 expert
@@ -385,6 +453,7 @@ function VoiceRow({
             <Button
               variant="danger"
               onClick={async () => {
+                if (!window.confirm(`Delete voice "${v.name}" and its reference audio? Books using it keep working but lose the voice link.`)) return;
                 await api.deleteVoice(v.id);
                 onChanged();
               }}
@@ -395,7 +464,7 @@ function VoiceRow({
         )}
       </div>
       {labOpen && !editing && <CloneLab v={v} onChanged={onChanged} onError={onError} />}
-    </div>
+    </Card>
   );
 }
 
@@ -453,14 +522,16 @@ function CloneLab({ v, onChanged, onError }: { v: Voice; onChanged: () => void; 
       <div className="border-t border-zinc-800 pt-3">
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wide">Clone test</span>
-          <input
-            className="flex-1 min-w-[240px] rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs"
+          <Input
+            size="sm"
+            className="flex-1 min-w-[240px]"
             value={testText}
             onChange={(e) => setTestText(e.target.value)}
             title="sentence the clone must say — defaults to Fraszki-style Polish"
           />
-          <input
-            className="w-20 rounded bg-zinc-800 border border-zinc-700 px-2 py-1 text-xs"
+          <Input
+            size="sm"
+            className="w-20"
             value={language}
             onChange={(e) => setLanguage(e.target.value)}
             title="language hint passed to synthesis and ASR"
@@ -485,21 +556,13 @@ function CloneLab({ v, onChanged, onError }: { v: Voice; onChanged: () => void; 
                   </div>
                   {test.qa.missing.length > 0 && (
                     <div>
-                      {test.qa.missing.map((m, i) => (
-                        <span key={i} className="inline-block rounded bg-red-950 border border-red-900 text-red-300 px-1.5 py-0.5 mr-1 mb-0.5">
-                          {m}
-                        </span>
-                      ))}
+                      {test.qa.missing.map((m, i) => <WordChip key={i} word={m} kind="missing" />)}
                     </div>
                   )}
                   {test.qa.extra.length > 0 && (
                     <div>
                       <span className="text-amber-400">not in text:</span>{' '}
-                      {test.qa.extra.map((m, i) => (
-                        <span key={i} className="inline-block rounded bg-amber-950/60 border border-amber-900 text-amber-300 px-1.5 py-0.5 mr-1 mb-0.5">
-                          {m}
-                        </span>
-                      ))}
+                      {test.qa.extra.map((m, i) => <WordChip key={i} word={m} kind="extra" />)}
                     </div>
                   )}
                   {test.qa.variants.length > 0 && (
@@ -512,9 +575,9 @@ function CloneLab({ v, onChanged, onError }: { v: Voice; onChanged: () => void; 
             )}
             {testUrl && (
               <div className="pt-1">
-                <button className="text-sky-400 hover:underline" onClick={() => void new Audio(testUrl).play()}>
+                <Button variant="link" size="sm" className="text-sky-400" onClick={() => void new Audio(testUrl).play()}>
                   ▶ hear the clone
-                </button>
+                </Button>
               </div>
             )}
           </div>
