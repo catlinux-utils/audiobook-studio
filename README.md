@@ -103,6 +103,34 @@ Development mode runs the API and a Vite dev server with hot reload:
 npm run dev             # API on :8090, UI on :5173 (proxies /api)
 ```
 
+### Nix flake (Linux x64)
+
+The flake builds the studio, the audio.cpp Vulkan runtime and the GGUF weights pinned in
+`versions.json`, so nothing is downloaded at first run:
+
+```bash
+nix run .                       # or: nix run github:<you>/audiobook-studio
+nix build .#models              # ~3.7 GB of weights only
+nix develop                     # Node 22 + ffmpeg for npm run dev
+```
+
+Mutable state lives in `${XDG_DATA_HOME:-~/.local/share}/audiobook-studio` (`data/`, `runtime/`);
+set `AUDIOBOOK_STUDIO_HOME` to move it. The launcher links the read-only store assets into that
+directory and leaves any real `runtime/bin` or `runtime/models` you already have untouched.
+
+| Output | Contents |
+|---|---|
+| `packages.default` | studio + audio.cpp runtime + OmniVoice, CrisperWhisper and MMS aligner (~4 GB) |
+| `packages.audiobook-studio-lite` | studio + runtime only; supply `runtime/models` yourself |
+| `packages.models` | the three GGUF model files |
+| `packages.audio-cpp` | audio.cpp 0.9.5 Ubuntu x64 Vulkan build |
+
+The TTS child needs a working Vulkan 1.3 driver (`libvulkan.so.1`); on NixOS enable
+`hardware.graphics.enable` and keep the user in the `video`/`render` groups. If the loader still finds
+no device, point `VK_DRIVER_FILES` at your driver's ICD json (NixOS:
+`/run/opengl-driver/share/vulkan/icd.d/*.json`). The flake only targets `x86_64-linux` — use
+`setup.ps1` on Windows.
+
 ## First book
 
 1. **Voices → add a voice.** Load a clean 20–60 s recording of the narrator (wav/mp3/m4a/ogg/flac),

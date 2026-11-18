@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 /**
  * Project root: works when running from source (src/) and compiled (dist/src/)
  * by walking up to the directory containing package.json.
+ *
+ * AUDIOBOOK_STUDIO_HOME overrides it so a read-only installation (e.g. the Nix
+ * store) keeps data/, runtime/ and versions.json in a writable state dir.
  */
 function findRoot(start: string): string {
   let dir = start;
@@ -17,7 +20,9 @@ function findRoot(start: string): string {
   return start;
 }
 
-const root = findRoot(path.dirname(fileURLToPath(import.meta.url)));
+const root = process.env.AUDIOBOOK_STUDIO_HOME
+  ? path.resolve(process.env.AUDIOBOOK_STUDIO_HOME)
+  : findRoot(path.dirname(fileURLToPath(import.meta.url)));
 
 export type AppSettings = {
   /** 'managed' = studio spawns its bundled audio.cpp runtime (standalone);

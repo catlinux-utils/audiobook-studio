@@ -34,7 +34,7 @@ Stop-Process -Id <pid> -Force
 ## Layout
 
 - `src/index.ts` — Fastify bootstrap: multipart, static SPA + SPA fallback, routes, managed-TTS lifecycle, SIGINT/SIGTERM shutdown.
-- `src/config.ts` — `AppSettings` + defaults, `paths.*`, `data/settings.json` load/save (every write re-serializes; hand-edits allowed).
+- `src/config.ts` — `AppSettings` + defaults, `paths.*`, `data/settings.json` load/save (every write re-serializes; hand-edits allowed). `AUDIOBOOK_STUDIO_HOME` overrides the project root (Nix wrapper uses it to keep state outside the read-only store).
 - `src/db.ts` — `DatabaseSync` (WAL, foreign keys), schema types, numbered `MIGRATIONS`. **Append new migrations at the end; never edit an applied one.** Migrations run transactionally on startup.
 - `src/bus.ts` — process-wide `EventEmitter` (`chunk.update`, `job.update`, `book.update`, `voices.update`) feeding SSE `/api/events`. UI always re-fetches; no websockets.
 - `src/api/routes.ts` — `registerRoutes()`, one file (~1770 lines) holding every HTTP route plus a few local helpers (`clampInt`/`clampNum`, QA cache/report writers, rechunk helpers). Keep handlers thin; register new endpoints here.
