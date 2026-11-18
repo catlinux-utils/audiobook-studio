@@ -2,7 +2,7 @@
 
 Local-first audiobook studio: ingest EPUB/TXT (or pasted text) → chunk → clone a voice via OmniVoice (audio.cpp on Vulkan) → word-level QA → export MP3/M4B with Discord-friendly compression. Windows machine, AMD GPU, **Vulkan only** (no CUDA/ROCm). No CI; `setup.ps1` (Windows) and `setup.sh` (Linux) install the pinned runtime.
 
-The server is the source of truth; the React SPA is a thin REST client. README.md is the user-facing manual — keep this file focused on how to change the code safely.
+The server is the source of truth; the React SPA is a thin REST client. README.md is the user-facing entry point and `docs/` holds the detailed manual (install, features, configuration, architecture/API, troubleshooting) — keep this file focused on how to change the code safely.
 
 ## Stack and entry points
 
